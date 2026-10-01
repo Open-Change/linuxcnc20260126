@@ -1,0 +1,98 @@
+# mdi command 1 MDI_COMMAND = o100 call
+net z-axis-touchoff halui.mdi-command-00 <= pyvcp.z-axis-touchoff
+
+net z-axis-touchoff-pcb halui.mdi-command-02 <= pyvcp.z-axis-touchoff-pcb
+
+# mdi command 2 MDI_COMMAND = G10 L20 P0 X0 Y0
+net zero-x-y halui.mdi-command-01 <= pyvcp.x-y_zero
+
+
+
+
+
+
+
+[HAL]
+HALUI = halui
+HALFILE = my-mill.hal
+HALFILE = custom.hal
+POSTGUI_HALFILE = custom_postgui.hal
+
+[HALUI]
+# add halui MDI commands here (max 64) 
+MDI_COMMAND = o100 call
+MDI_COMMAND = G10 L20 P1 X0 Y0
+MDI_COMMAND = o101 call
+
+[TRAJ]
+AXES = 3
+COORDINATES = X Y Z
+LINEAR_UNITS = mm
+ANGULAR_UNITS = degree
+CYCLE_TIME = 0.010
+DEFAULT_VELOCITY = 10.00
+MAX_VELOCITY = 100.00
+
+
+
+
+
+
+o100 sub
+( Set current Z position to 0 so that we will always be moving down )
+G10 L20 P1 Z0
+( Probe to Z-10 at F25 [Uses machine units, I work in mm, this is meant to be slow!] )
+G38.2 Z-10 f25
+( Set Z0 at point where probe triggers with offset of +1.47 [this is the thickness of my PCB plate. You must adjust this for your plate / setup] )
+G10 L20 P1 Z19.5
+( Rapid up to Z10 above the material )
+G0 Z30
+o100 endsub
+
+
+
+
+analog veya pwm kontrol?
+
+
+loadrt pwmgen output_type=0
+
+loadrt pwmgen output_type=0
+addf pwmgen.make-pulses base-thread
+addf pwmgen.update servo-thread
+
+
+
+net aout-00 => pwmgen.0.value
+net spindle-on <= motion.spindle-on => pwmgen.0.enable
+net spindle-pwm <= pwmgen.0.pwm
+setp pwmgen.0.pwm-freq 1000.0
+#setp pwmgen.0.scale 255.0
+setp pwmgen.0.scale 1000.0
+setp pwmgen.0.offset 0
+setp pwmgen.0.dither-pwm true
+
+net dout-00 <= motion.digital-out-00
+net aout-00 <= motion.analog-out-00
+
+net dout-00         => parport.0.pin-16-out
+
+
+
+
+[HALUI]
+# add halui MDI commands here (max 64) 
+MDI_COMMAND = m65 p0
+MDI_COMMAND = m68 e0 q0
+MDI_COMMAND = G10 L20 P1 x0 y0 z0
+MDI_COMMAND = g0 x0 y0 z0
+
+
+net dout-00 => pyvcp.ttl-laser-led
+net aout-00 => pyvcp.laser-power
+net remote-ttl-off halui.mdi-command-00 <= pyvcp.ttl-off
+net remote-pwm-off halui.mdi-command-01 <= pyvcp.pwm-off
+net remote-set-zero halui.mdi-command-02 <= pyvcp.set-zero
+net remote-go-zero halui.mdi-command-03 <= pyvcp.go-zero
+
+

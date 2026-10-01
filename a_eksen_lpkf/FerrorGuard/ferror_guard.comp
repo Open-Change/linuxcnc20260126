@@ -1,0 +1,395 @@
+component ferror_guard "LinuxCNC Gelişmiş Takip Hatası ve Besleme Kontrol Bileşeni";
+
+description
+"""
+Eksen takip hatasına (following error) bağlı olarak dinamik INC/DEC pulse'ları üreten,
+G33/G76 senkronize hareket kilitli, tam zamanlayıcı (timer) kontrollü
+ve durum makineli LinuxCNC realtime koruma bileşeni.
+""";
+
+author "Tevfik";
+license "GPL";
+
+// 1. FONKSİYON TANIMI
+function _ fp "Ana ferror guard döngüsü";
+
+// 2. GİRDİ PINLERİ
+pin in float ferror_in "Eksen takip hatası (abs alınmış)";
+pin in bit program_running = 0 "halui.program.is-running pini bağlanır";
+pin in s32 motion_type = 0 "motion.motion-type (3 = Diş açma / G33/G76)";
+pin in float halui_feed_scale = 1.0 "halui.feed-override.value pini bağlanır";
+
+pin in bit manual_override = 0 "Manuel override modu aktif";
+pin in float manual_scale = 1.0 "Manuel modda kullanılacak ölçek";
+pin in bit manual_inc = 0 "Manuel artırma tetikleyicisi";
+pin in bit manual_dec = 0 "Manuel azaltma tetikleyicisi";
+pin in bit reset_peak_pin = 0 "Peak ferror değerini sıfırlayan tetikleme pini";
+
+// 3. PARAMETRELER
+param rw float limit_pause = 0.912 "Pause hata eşiği";
+param rw float limit_hold = 0.600 "Hold hata eşiği";
+param rw float limit_dec = 0.400 "DEC modu başlangıç eşiği";
+param rw float limit_inc = 0.100 "INC modu üst eşiği";
+param rw float limit_hysteresis_high = 0.390 "Histerezis üst sınırı";
+
+param rw float pulse_width = 0.050 "Darbe genişliği (saniye)";
+param rw float pulse_interval = 0.250 "Darbeler arası bekleme (saniye)";
+param rw float inc_stable_time = 5.000 "INC için kararlı süre (saniye)";
+param rw float hold_stable_time = 1.000 "Hold çıkış kararlı süre (saniye)";
+param rw float debounce_dt = 0.050 "Manuel buton debounce süresi";
+
+// 4. ÇIKIŞ PINLERİ
+pin out float current_feed_scale "Hesaplanan aktif feed scale değeri";
+pin out s32 error_code_out "Hata kodu (0=Normal, 1=DEC, 2=Hold, 3=Pause, 4=Diş Açma)";
+pin out float hold_timer_out "Hold durumunda geçen süre";
+pin out float system_uptime "Sistem çalışma süresi (saniye)";
+pin out float peak_ferror_out "Okunan en yüksek ferror değeri";
+
+pin out bit feed_hold = 0 "motion.feed-hold bağlantısı";
+pin out bit program_pause = 0 "halui.program.pause bağlantısı";
+pin out bit feed_inc_pulse = 0 "Feed Override INC darbe";
+pin out bit feed_dec_pulse = 0 "Feed Override DEC darbe";
+pin out bit error_log_trigger = 0 "Log tetikleme darbesi";
+
+// Durum Bildirim Pinleri
+pin out bit inc_mode_active = 0 "INC modu aktif";
+pin out bit hysteresis_mode_active = 0 "Histerezis bölgesi aktif";
+pin out bit dec_mode_active = 0 "DEC modu aktif";
+pin out bit hold_mode_active = 0 "Hold modu aktif";
+pin out bit pause_mode_active = 0 "Pause modu aktif";
+
+// İstatistik Pinleri
+pin out s32 inc_pulse_count_out "Toplam INC darbesi sayısı";
+pin out s32 dec_pulse_count_out "Toplam DEC darbesi sayısı";
+pin out s32 pause_count_out "Toplam Pause sayısı";
+pin out s32 hold_count_out "Toplam Hold sayısı";
+
+// 5. İÇ DEĞİŞKENLER (C Tipleri Kullanılmalı)
+variable float ferror_history[100];
+variable int history_index = 0;
+variable int history_count = 0;
+variable float ferror_sum = 0.0;
+variable int history_initialized = 0;   // 'bit' yerine 'int'
+
+variable float internal_uptime = 0.0;
+variable float hold_timer = 0.0;
+variable float last_action_timer = 0.0;
+variable float error_free_time = 0.0;
+variable float hold_recovery_timer = 0.0;
+variable float peak_ferror = 0.0;
+
+variable float inc_pulse_timer = 0.0;
+variable float dec_pulse_timer = 0.0;
+variable int inc_pulse_active = 0;      // 'bit' yerine 'int'
+variable int dec_pulse_active = 0;      // 'bit' yerine 'int'
+variable float internal_feed_override = 1.0;
+
+variable int prev_hold_state = 0;       // 'bit' yerine 'int'
+variable int prev_pause_state = 0;      // 'bit' yerine 'int'
+variable int in_hold_recovery = 0;      // 'bit' yerine 'int'
+
+variable int inc_pulse_count = 0;       // 's32' yerine 'int'
+variable int dec_pulse_count = 0;       // 's32' yerine 'int'
+variable int pause_count = 0;           // 's32' yerine 'int'
+variable int hold_count = 0;            // 's32' yerine 'int'
+
+;;
+
+#include <rtapi_math.h>
+
+FUNCTION(_) {
+    int i;
+    float abs_ferror;
+    float avg_ferror;
+
+    // A. DİZİ BAŞLATMA
+    if (!history_initialized) {
+        for (i = 0; i < 100; i++) {
+            ferror_history[i] = 0.0;
+        }
+        history_initialized = 1;
+    }
+
+    // B. SİSTEM ZAMANLAYICILARI
+    internal_uptime += fperiod;
+    system_uptime = internal_uptime;
+    last_action_timer += fperiod;
+
+    // C. PEAK FERROR TAKİBİ
+    if (reset_peak_pin) {
+        peak_ferror = 0.0;
+    }
+    abs_ferror = (ferror_in < 0.0) ? -ferror_in : ferror_in;
+    if (abs_ferror > peak_ferror) {
+        peak_ferror = abs_ferror;
+    }
+    peak_ferror_out = peak_ferror;
+
+    // D. KAYAR ORTALAMA (Moving Average)
+    ferror_sum -= ferror_history[history_index];
+    ferror_history[history_index] = abs_ferror;
+    ferror_sum += abs_ferror;
+
+    history_index = (history_index + 1) % 100;
+    if (history_count < 100) {
+        history_count++;
+    }
+
+    avg_ferror = (history_count > 0) ? (ferror_sum / (float)history_count) : abs_ferror;
+
+    // E. LOG TRIGGER SIFIRLAMA
+    if (error_log_trigger) {
+        error_log_trigger = 0;
+    }
+
+    // F. PULSE ZAMANLAYICI YÖNETİMİ
+    if (inc_pulse_active) {
+        inc_pulse_timer += fperiod;
+        if (inc_pulse_timer >= pulse_width) {
+            feed_inc_pulse = 0;
+            inc_pulse_active = 0;
+            inc_pulse_timer = 0.0;
+        } else {
+            feed_inc_pulse = 1;
+        }
+    } else {
+        feed_inc_pulse = 0;
+    }
+
+    if (dec_pulse_active) {
+        dec_pulse_timer += fperiod;
+        if (dec_pulse_timer >= pulse_width) {
+            feed_dec_pulse = 0;
+            dec_pulse_active = 0;
+            dec_pulse_timer = 0.0;
+        } else {
+            feed_dec_pulse = 1;
+        }
+    } else {
+        feed_dec_pulse = 0;
+    }
+
+    // G. FEED SCALE HESAPLAMA
+    float base_scale = (manual_override) ? manual_scale : halui_feed_scale;
+    current_feed_scale = base_scale * internal_feed_override;
+    if (current_feed_scale < 0.05) current_feed_scale = 0.05;
+    if (current_feed_scale > 1.20) current_feed_scale = 1.20;
+
+    // H. DİŞ AÇMA KONTROLÜ (G33/G76)
+    if (motion_type == 3) {
+        error_code_out = 4;
+        feed_hold = 0;
+        program_pause = 0;
+        feed_inc_pulse = 0;
+        feed_dec_pulse = 0;
+        inc_pulse_active = 0;
+        dec_pulse_active = 0;
+        inc_pulse_timer = 0.0;
+        dec_pulse_timer = 0.0;
+        
+        inc_mode_active = 0;
+        hysteresis_mode_active = 0;
+        dec_mode_active = 0;
+        hold_mode_active = 0;
+        pause_mode_active = 0;
+        
+        hold_timer = 0.0;
+        hold_recovery_timer = 0.0;
+        error_free_time = 0.0;
+        prev_hold_state = 0;
+        prev_pause_state = 0;
+        in_hold_recovery = 0;
+        return;
+    }
+
+    // I. DURUM MAKİNESİ (FSM)
+    if (program_running) {
+
+        // 1. PAUSE MODU
+        if (avg_ferror >= limit_pause) {
+            program_pause = 1;
+            feed_hold = 1;
+            error_code_out = 3;
+            
+            pause_mode_active = 1;
+            hold_mode_active = 0;
+            dec_mode_active = 0;
+            hysteresis_mode_active = 0;
+            inc_mode_active = 0;
+
+            if (!prev_pause_state) {
+                pause_count++;
+                error_log_trigger = 1;
+                prev_pause_state = 1;
+            }
+
+            error_free_time = 0.0;
+            hold_recovery_timer = 0.0;
+            hold_timer = 0.0;
+            return;
+        } else {
+            if (prev_pause_state) {
+                program_pause = 0;
+                feed_hold = 0;
+                prev_pause_state = 0;
+            }
+            pause_mode_active = 0;
+        }
+
+        // 2. HOLD MODU
+        if (avg_ferror >= limit_hold) {
+            feed_hold = 1;
+            error_code_out = 2;
+            hold_timer += fperiod;
+
+            hold_mode_active = 1;
+            dec_mode_active = 0;
+            hysteresis_mode_active = 0;
+            inc_mode_active = 0;
+
+            if (!prev_hold_state) {
+                hold_count++;
+                error_log_trigger = 1;
+                prev_hold_state = 1;
+            }
+
+            error_free_time = 0.0;
+            hold_recovery_timer = 0.0;
+            in_hold_recovery = 0;
+            return;
+        }
+
+        // 3. HOLD ÇIKIŞ / RECOVERY
+        if (prev_hold_state) {
+            in_hold_recovery = 1;
+            hold_recovery_timer += fperiod;
+
+            if (hold_recovery_timer >= hold_stable_time) {
+                feed_hold = 0;
+                prev_hold_state = 0;
+                in_hold_recovery = 0;
+                hold_recovery_timer = 0.0;
+                hold_timer = 0.0;
+            } else {
+                feed_hold = 1;
+            }
+        } else {
+            feed_hold = 0;
+            in_hold_recovery = 0;
+            hold_recovery_timer = 0.0;
+        }
+
+        if (prev_pause_state) {
+            program_pause = 0;
+            prev_pause_state = 0;
+        }
+
+        // 4. DEC MODU
+        if (avg_ferror >= limit_dec) {
+            error_code_out = 1;
+            error_free_time = 0.0;
+
+            dec_mode_active = 1;
+            hysteresis_mode_active = 0;
+            inc_mode_active = 0;
+            hold_mode_active = (in_hold_recovery) ? 1 : 0;
+
+            if (last_action_timer >= pulse_interval && !dec_pulse_active && !inc_pulse_active) {
+                dec_pulse_active = 1;
+                dec_pulse_timer = 0.0;
+                dec_pulse_count++;
+                last_action_timer = 0.0;
+                
+                internal_feed_override -= 0.05;
+                if (internal_feed_override < 0.05) internal_feed_override = 0.05;
+            }
+        }
+        // 5. HİSTEREZİS MODU
+        else if (avg_ferror >= limit_inc) {
+            error_code_out = 0;
+            error_free_time = 0.0;
+
+            hysteresis_mode_active = 1;
+            dec_mode_active = 0;
+            inc_mode_active = 0;
+            hold_mode_active = (in_hold_recovery) ? 1 : 0;
+
+            dec_pulse_active = 0;
+            inc_pulse_active = 0;
+            
+            if (last_action_timer > pulse_interval) {
+                last_action_timer = pulse_interval;
+            }
+        }
+        // 6. INC MODU
+        else {
+            error_code_out = 0;
+            error_free_time += fperiod;
+
+            inc_mode_active = 1;
+            dec_mode_active = 0;
+            hysteresis_mode_active = 0;
+            hold_mode_active = (in_hold_recovery) ? 1 : 0;
+
+            if (error_free_time >= inc_stable_time && 
+                last_action_timer >= pulse_interval && 
+                !inc_pulse_active && !dec_pulse_active) {
+                
+                inc_pulse_active = 1;
+                inc_pulse_timer = 0.0;
+                inc_pulse_count++;
+                last_action_timer = 0.0;
+                error_free_time = 0.0;
+                
+                internal_feed_override += 0.05;
+                if (internal_feed_override > 1.00) internal_feed_override = 1.00;
+            }
+        }
+
+    } else {
+        // J. PROGRAM IDLE / MANUEL MOD
+        pause_mode_active = 0;
+        hold_mode_active = 0;
+        dec_mode_active = 0;
+        hysteresis_mode_active = 0;
+        inc_mode_active = 0;
+
+        feed_hold = 0;
+        program_pause = 0;
+        error_code_out = 0;
+        
+        in_hold_recovery = 0;
+        hold_timer = 0.0;
+        hold_recovery_timer = 0.0;
+        error_free_time = 0.0;
+        prev_hold_state = 0;
+        prev_pause_state = 0;
+
+        if (last_action_timer >= debounce_dt) {
+            if (manual_inc && !manual_dec && !inc_pulse_active && !dec_pulse_active) {
+                inc_pulse_active = 1;
+                inc_pulse_timer = 0.0;
+                inc_pulse_count++;
+                last_action_timer = 0.0;
+                
+                internal_feed_override += 0.05;
+                if (internal_feed_override > 1.20) internal_feed_override = 1.20;
+            } else if (manual_dec && !manual_inc && !dec_pulse_active && !inc_pulse_active) {
+                dec_pulse_active = 1;
+                dec_pulse_timer = 0.0;
+                dec_pulse_count++;
+                last_action_timer = 0.0;
+                
+                internal_feed_override -= 0.05;
+                if (internal_feed_override < 0.05) internal_feed_override = 0.05;
+            }
+        }
+    }
+
+    // K. ÇIKIŞ PIN GÜNCELLEMELERİ
+    hold_timer_out = hold_timer;
+    inc_pulse_count_out = inc_pulse_count;
+    dec_pulse_count_out = dec_pulse_count;
+    pause_count_out = pause_count;
+    hold_count_out = hold_count;
+}

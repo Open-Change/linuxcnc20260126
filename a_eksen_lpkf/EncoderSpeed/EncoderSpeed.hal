@@ -1,0 +1,86 @@
+# =============================================================================
+# EncoderSpeed.hal
+# UDP gecikmeli encoder icin observer + PID + Feed-Forward
+# Bu dosya ana HAL'den "source EncoderSpeed/EncoderSpeed.hal" ile cagrilir.
+# =============================================================================
+# =============================================================================
+# EncoderSpeed.hal — AS5600 + 6.35mm Trapez Vida için İDEAL AYARLAR
+# Sistem: UDP gecikmeli AS5600 (4096 count/devir) + 6.35mm trapez vida
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. BILESENI YUKLE
+# -----------------------------------------------------------------------------
+loadrt EncoderSpeed count=1
+
+# -----------------------------------------------------------------------------
+# 2. FONKSIYONU SERVO THREAD'E EKLE
+# -----------------------------------------------------------------------------
+addf EncoderSpeed.0 servo-thread
+
+# -----------------------------------------------------------------------------
+# 3. GIRIS BAGLANTILARI
+# -----------------------------------------------------------------------------
+
+# 3a. UDP'den ham pozisyon
+net udp-pos-fb      udp.0.position-fb              EncoderSpeed.0.pos-in
+
+# 3b. UDP'den "yeni pozisyon geldi" bayragi
+net udp-pos-valid   udp.yeniposizyongeldi        EncoderSpeed.0.yeniposizyongeldi
+
+# 3c. Hareket komutu (LinuxCNC motion'dan)
+net x-pos-cmd       joint.0.motor-pos-cmd          EncoderSpeed.0.cmd-in
+
+# 3d. Enable (LinuxCNC amplifier enable)
+net xenable              EncoderSpeed.0.enable
+
+# -----------------------------------------------------------------------------
+# 4. CIKIS BAGLANTILARI
+# -----------------------------------------------------------------------------
+
+# 4a. Temiz pozisyon -> LinuxCNC geri besleme
+net xpos-fb         EncoderSpeed.0.pos-out         joint.0.motor-pos-fb
+
+# 4b. PID cikisi -> stepgen hiz komutu
+net x-vel-cmd       EncoderSpeed.0.pid-out         stepgen.0.velocity-cmd
+
+# 4c. Tani pinleri (halmeter / halscope icin)
+net x-vel-est       EncoderSpeed.0.vel-out
+net x-acc-est       EncoderSpeed.0.acc-out
+net x-jump-flag     EncoderSpeed.0.jump-flag
+net x-stale-flag    EncoderSpeed.0.stale-flag
+net x-innov         EncoderSpeed.0.innov-out
+net x-pid-err       EncoderSpeed.0.err-out
+net x-wrap-flag     EncoderSpeed.0.wrap-flag
+
+# =============================================================================
+# OBSERVER PARAMETRELERİ
+# =============================================================================
+setp EncoderSpeed.0.alpha          0.550    # Pozisyon düzeltme kazancı
+setp EncoderSpeed.0.beta           0.080    # Hız düzeltme kazancı
+setp EncoderSpeed.0.obs-gamma      0.000    # İvme düzeltmesi (kapalı)
+setp EncoderSpeed.0.vel-alpha      0.900    # Hız EMA filtresi
+
+# =============================================================================
+# OUTLIER / KUANTİZASYON
+# =============================================================================
+setp EncoderSpeed.0.jump-thresh    5.000    # Outlier eşiği [derece] (~57 count)
+setp EncoderSpeed.0.stale-timeout  0.150    # Paket timeout [s]
+setp EncoderSpeed.0.quant-step     0.087891 # AS5600 1 LSB [derece]
+setp EncoderSpeed.0.pos-deadband   1.000    # Deadband (quant_step'in katı)
+setp EncoderSpeed.0.wrap-range     360.000  # Wrap aralığı [derece]
+
+# =============================================================================
+# PID PARAMETRELERİ
+# =============================================================================
+setp EncoderSpeed.0.pid-kp         3.500    # Oransal kazanç
+setp EncoderSpeed.0.pid-ki         0.500    # İntegral kazancı
+setp EncoderSpeed.0.pid-kd         0.350    # Türev kazancı (observer hızı)
+setp EncoderSpeed.0.pid-kff        2.000    # Hız feed-forward
+setp EncoderSpeed.0.pid-kacc       0.000    # İvme FF (kapalı)
+setp EncoderSpeed.0.pid-i-max      1.000    # Anti-windup limiti
+setp EncoderSpeed.0.pid-out-min   -6.000    # PID alt limit
+setp EncoderSpeed.0.pid-out-max    6.000    # PID üst limit
+# =============================================================================
+# SON
+# =============================================================================

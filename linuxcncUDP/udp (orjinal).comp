@@ -1,0 +1,877 @@
+/*    This is a component of LinuxCNC for hardware step generator over UDP
+ *    Copyright 2021 JuhĂĄsz ZoltĂĄn <juhasz.zoltan at freemail dot hu>
+ *
+ *    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+component udp "HAL2UDP";
+
+pin in  float   #.position_cmd[4]   = 0.0   "commanded position in position units";
+pin in  float   #.velocity_cmd[4]   = 0.0   "commanded velocity in position units/s";
+pin out float   #.position_fb[4]    = 0.0   "feedback position in position units";
+pin out float   #.velocity_fb[4]    = 0.0   "feedback velocity in position units/s";
+
+pin in  bit     pin.##.out[8]       = 0     "Digital output";
+// hal file   udp.pin.01.out
+// net  example    spindle-on      spindle.0.on                udp.pin.01.out
+pin out bit     pin.##.in[8]        = 0     "Digital inputs";
+
+pin out bit     ready               = 0     "Module state";
+pin in  bit     enable              = 0     "Module enable";
+
+
+
+ 
+pin in  bit     allhomeoldu            	= 0     "Module enable";
+pin in  bit     xhomeoldu	            = 0     "Module enable";
+pin in  bit     yhomeoldu	            = 0     "Module enable";
+pin in  bit     zhomeoldu	            = 0     "Module enable";
+pin out  bit     ZPulseSinyal	            = 0     "Module enable";
+
+pin out  bit yeniposizyongeldi   =0;
+
+
+pin out float     packets             = 0;
+pin out float     packetsgelen       = 0;
+pin out float     ozelveri            = 0;
+
+pin out float     toplamXacisi            = 0;
+pin out float     toplamYacisi            = 0;
+pin out float     toplamAacisi            = 0;
+
+pin out float     xeksen_aci_fb            = 0;
+pin out float     yeksen_aci_fb            = 0;
+pin out float     aeksen_aci_fb            = 0;
+
+
+pin out float     ozelveri_x            = 0;
+pin out float     ozelveri_y            = 0;
+pin out float     ozelveri_a            = 0;
+
+pin in  float   #.motor.pos_cmd[4]   = 0.0   "commanded position in position units";
+pin out s32     zero       = 0;
+
+
+
+param   rw  u32     #.dirsetup[4]   = 1     "Minimum time from a direction change to the beginning of the next step pulse in ns";
+param   rw  float   #.scale[4]      = 1.0   "Steps per position unit";
+param   rw  float   #.maxvel[4]     = 1.0   "Maximum velocity in position units/s";
+param   rw  float   #.maxacc[4]     = 1.0   "Maximum acceleration in position units/s2";
+
+/*------------^^^^^^^^^^ linuxcnc hal fonksiyonuna ait tanınlamar #^^^^^^^^^^-----------------*/
+
+
+
+/*-------------------------------------*/
+
+option singleton;
+option extra_setup;
+option extra_cleanup;
+
+function _;
+
+license "GPL"; // indicates GPL v2 or later
+;;
+
+/*-------------------------------------*/
+
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <stdio.h>
+
+#include <string.h>
+
+#include <rtapi_slab.h>
+#include <rtapi_ctype.h>
+#include <rtapi_list.h>
+#include <rtapi_math.h>
+#include <rtapi_math64.h>
+
+#include "rtapi.h"
+#include "rtapi_app.h"
+#include "rtapi_string.h"
+
+
+#include "udpcompenet.h"
+
+
+/*     stm32 and linuxcnc ortak udpcompenet.h uygun olur  */     
+/* sudo tcpdump -i any -n udp port 5000 */
+
+double Aci2Posizyon           (double  eskiAci ,double gelenAci);
+//double Aci2PosizyonOrjinal    (double  eskiAci ,double gelenAci);
+//270 büyük sapmalara izin var
+//float alfa_beta(float xm);
+
+
+#define CTRL_DIRSETUP 0b00000001
+#define CTRL_MAXVEL   0b00000010
+#define CTRL_MAXACC   0b00000100
+#define CTRL_READY     0
+#define CTRL_ENABLE   0b10000000
+
+#define IO_00 0b00000001
+#define IO_01 0b00000010
+#define IO_02 0b00000100
+#define IO_03 0b00001000
+#define IO_04 0b00010000
+#define IO_05 0b00100000
+#define IO_06 0b01000000
+#define IO_07 0b10000000
+
+
+
+
+
+/*
+#define BUFSIZE 150
+#define SEND_TIMEOUT_US 100
+#define RECV_TIMEOUT_US 100
+#define REMOTE_IP "192.168.1.2"
+#define REMOTE_UDP_PORT 5000
+*/
+
+
+
+/*tevfik               https://www.cplusplus.com/reference/cstdio/printf/        */
+#define BUFSIZE 250
+#define SEND_TIMEOUT_US 100   //10
+#define RECV_TIMEOUT_US 200   //10 
+#define READ_PCK_DELAY_NS 10000 // 10000
+#define REMOTE_IP "192.168.1.2"
+#define REMOTE_UDP_PORT 5000
+
+int sockfd, n;
+struct sockaddr_in server;
+struct timeval timeout;
+char txbuf[BUFSIZE];
+char rxbuf[BUFSIZE];
+
+
+ static  float eski_aci_x;
+ static  float eski_aci_y;
+ static  float eski_aci_a;
+ static  int   ilk_calisma;
+
+ 
+ //static  int ilk_calisma_y_position;
+ 
+ 
+static float ilk_aci_x,gelen_aci_x;
+static float ilk_aci_y,gelen_aci_y,yhome_motor_pozisyonu;
+static float ilk_aci_a,gelen_aci_a;    
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+     
+ //static     float oldPosition_y;
+ //           float newPosition_y;
+     
+//double kalman_filter2 (double input);
+  
+/*-------------------------------------*/
+
+EXTRA_SETUP()
+{
+	eski_aci_x=0;
+	eski_aci_y=0;
+	eski_aci_a=0;
+
+
+
+	ilk_aci_x=0;
+	ilk_aci_y=0;
+	ilk_aci_a=0;
+	
+	ilk_calisma=0;
+	
+	//ilk_calisma_y_position=0;
+	
+    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);//IPPROTO_UDP
+    server.sin_family = AF_INET;
+    server.sin_port = htons(REMOTE_UDP_PORT);
+    server.sin_addr.s_addr = inet_addr(REMOTE_IP);
+    timeout.tv_sec = 0;
+    timeout.tv_usec = RECV_TIMEOUT_US;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    timeout.tv_usec = SEND_TIMEOUT_US;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+    return 0;
+}
+
+EXTRA_CLEANUP()
+{
+    close(sockfd);
+}
+
+
+
+FUNCTION(_)
+{
+ 
+static int   i ;  // udp üzerinde kac kez almaya calıstıgını gosteren sayac
+ long long t1, t2;// udp üzerinde veri  almak için verilen sure                 taşarsa >bilgi alamamaz geri dönüş -1
+
+        //rtapi_snprintf(txbuf, 250, " tevfik=%d",packets);   komut orneği 250 byte  tampon var
+        ///olmadi memcpy(&txbuf, &cmd, sizeof(cmd));          daha bu komutu verimli şekilde kullanamadım
+        //   fb.vel[1]=packets;
+        //  _position_fb(1)=packets;
+        //  cmd.vel[0]=packets;
+
+
+        // _position_fb(0)=25;        /* kural bu imiş  linuxcnc hal olarak yollamak :)  */
+ 
+
+//rtapi_snprintf(txbuf, 250, "%d----1234567890",12345678);//packets,cmd.vel[0]);
+//n = sendto(sockfd, txbuf, sizeof(txbuf)+ 1, 0, &server, sizeof(server));
+//packets++;
+
+
+
+///*         inputs         */  
+//
+//if(cmd.io & 0x01){	 Y0ROLE=1 ;} else   {  Y0ROLE=0 ; }
+//if(cmd.io & 0x02){	 Y1ROLE=1 ;} else   {  Y1ROLE=0 ; }
+//if(cmd.io & 0x04){	 Y2ROLE=1 ;} else   {  Y2ROLE=0 ; }
+//if(cmd.io & 0x08){	 Y3ROLE=1 ;} else   {  Y3ROLE=0 ; }
+//if(cmd.io & 0x10){	 Y4ROLE=1 ;} else   {  Y4ROLE=0 ; }
+//if(cmd.io & 0x20){	 Y5ROLE=1 ;} else   {  Y5ROLE=0 ; }		
+//if(cmd.io & 0x40){	 Y6ROLE=1 ;} else   {  Y6ROLE=0 ; }
+//if(cmd.io & 0x80){	 Y7ROLE=1 ;} else   {  Y7ROLE=0 ; }
+
+
+								
+/*         inputs         */  
+cmd.io=(cmd.io   &  0xfe) + (1  * pin_out(0));
+cmd.io=(cmd.io   &  0xfd) + (2  * pin_out(1));
+cmd.io=(cmd.io   &  0xfb) + (4  * pin_out(2));
+cmd.io=(cmd.io   &  0xf7) + (8  * pin_out(3));
+cmd.io=(cmd.io   &  0xef) + (16 * pin_out(4));
+cmd.io=(cmd.io   &  0xdf) + (32 * pin_out(5));
+cmd.io=(cmd.io   &  0xbf) + (64 * pin_out(6));
+cmd.io=(cmd.io   &  0x7f) + (128* 1);//pin_out(7));//#define CTRL_ENABLE   0b10000000										
+
+ozel.veriC= cmd.io ;
+
+
+ 
+rtapi_snprintf(txbuf, 250, "%0.6f:%0.6f:%0.6f:AAA:%0.6f",        (float)_position_cmd(0), (float)_position_cmd(1) ,(float)ozel.veriC , (float)packets );
+
+n = sendto(sockfd, txbuf, sizeof(txbuf)+ 1, 0, &server, sizeof(server));
+//pc >>> stm32
+// stm32 bos=  sscanf (gelendatalar, "%f:%f:%f:AAA:%f",&ozel.veriA, &ozel.veriB,  &ozel.veriC,&gelen_paket_zamani );
+
+
+
+
+
+//    https://github.com/LinuxCNC/linuxcnc/blob/master/src/hal/drivers/mesa-hostmot2/hm2_eth.c
+//https://github.com/machinekit/machinekit/blob/master/src/hal/drivers/mesa-hostmot2/hm2_eth.c
+                           // i=0;     
+                            t1 = rtapi_get_time();
+                            do {
+                                   rtapi_delay(READ_PCK_DELAY_NS);
+                                 // n=   recv(sockfd, rxbuf, sizeof(rxbuf), 0);
+                                    n = recvfrom(sockfd, rxbuf, sizeof(rxbuf) - 1, 0, NULL, NULL);
+                                   
+                                   if (n > 0) { i=0;
+       						 rxbuf[n] = '\0'; // String sonlandırıcı
+       						 yeniposizyongeldi=1;
+        					 break; // Paket başarıyla geldi, döngüden çık
+    						}				
+ 
+                                    t2 = rtapi_get_time();
+                                   i++;
+                                } while ((t2 - t1) < 10); // Max 1 ms bekle
+                                //} while ((n < 0) && ((t2 - t1) < 1000*1000));
+
+   packets=  i;//recv error
+
+                    //memcpy(&veri, &rxbuf, sizeof(veri));//olmadi
+                    n  = sscanf  ( rxbuf, "%f:%f:%f:", &ozel.veriA,  &ozel.veriB, &ozel.veriC  );
+                    
+				
+  
+  
+  
+                     
+            if  (ozel.veriC >500){ZPulseSinyal=0;}else{ZPulseSinyal=1;}
+ 
+            gelen_aci_x= fmod( (ozel.veriA   * 360/4096) ,360.0);//  /0.087890625);
+            xeksen_aci_fb=(float) gelen_aci_x;//HAL görmek
+         
+          
+            gelen_aci_y= fmod( (ozel.veriB   * 360/4096),360.0);// /0.087890625);
+            yeksen_aci_fb=(float) gelen_aci_y;//HAL görmek
+
+           
+           gelen_aci_a=  fmod ( (ozel.veriC* 360/2000),360); //      (ozel.veriC   * 360/4096);// /0.087890625);
+           aeksen_aci_fb=(float) gelen_aci_a;//HAL görmek
+ 
+
+
+if  (ilk_calisma==0) 
+                       {
+				ilk_calisma=1;
+				eski_aci_x=gelen_aci_x;
+				eski_aci_y=gelen_aci_y;
+
+			    ilk_aci_x=0.017638888888889  * gelen_aci_x    ;
+			    ilk_aci_y=0.017638888888889  * gelen_aci_y    ;
+			    ilk_aci_a=gelen_aci_a/(172.74);
+						}
+
+  
+				// 120 dereeden fazla dönüştü hata var joint error
+// if ( (fabs(eski_aci_y -Aci2Posizyon   ( (double) eski_aci_y  ,(double) gelen_aci_y))) <120)
+		   {eski_aci_y =Aci2Posizyon   ( (double) eski_aci_y  ,(double) gelen_aci_y);}	 
+		  
+ //if (  (fabs(eski_aci_x -Aci2Posizyon  ( (double) eski_aci_x  ,(double) gelen_aci_x))) <120)
+
+		    {eski_aci_x =Aci2Posizyon  ( (double) eski_aci_x  ,(double) gelen_aci_x);}
+
+
+			  
+       	
+
+		 
+				  
+					//  hız=ilk konum - (eksi)sonra ki konum   alınan yol / alınan zaman
+					// _velocity_fb(0)= ( (0.017591116        * eski_aci_x)-_position_fb(0) )/ (t2-t1) ;
+					// _velocity_fb(1)= ( (0.017638888888889  * eski_aci_y)-_position_fb(1) )/ (t2-t1) ;
+				   
+     
+                
+	
+
+								 
+				//filitre baş	
+				//float xfilitrepostion=0;	
+				//	 	 
+				//	 xfilitrepostion = 0.05 *_position_fb(0)  + (1.0f - 0.05) * xfilitrepostion ;
+				//	_position_fb(0)=xfilitrepostion;     
+				// lowpass  linuxcnc  de ki 0.95 kaba ayar 0.03 ince ayar      
+                // filitre son
+ 			         eski_aci_a =Aci2Posizyon  ( (double) eski_aci_a  ,(double) gelen_aci_a);				 
+								 
+                                  {_position_fb(0)= (0.017638888888889  * eski_aci_x) - ilk_aci_x    ; }									 
+								 //0.017638888888889 =6.35/360 
+				  {_position_fb(1)= (0.017638888888889  * eski_aci_y) - ilk_aci_y    ; }				 
+								 //0.017638888888889 =6.35/360 
+					
+								 
+						   // 1 bolu 120 gear oran      
+				   _position_fb(3)=(  (eski_aci_a-ilk_aci_a) /(172.74) )  ;                
+								 
+				 
+
+						  
+				  
+
+																	 
+					ozelveri_x=eski_aci_x;
+					ozelveri_y=eski_aci_y;
+					ozelveri_a=eski_aci_a;
+						
+					toplamXacisi=eski_aci_x ; 
+					toplamYacisi=eski_aci_y;
+					toplamAacisi=eski_aci_a;
+
+
+
+
+  }
+
+
+
+//    t1 = rtapi_get_time();
+//    do {
+//        rtapi_delay(READ_PCK_DELAY_NS);
+//        recv = eth_socket_recv(sockfd, (void*) &tmp_buffer, size, 0);
+//        t2 = rtapi_get_time();
+//        i++;
+//    } while ((recv < 0) && ((t2 - t1) < 200*1000*1000));
+//LL_PRINT_IF(debug, "read(%d) : PACKET RECV [DATA: %08X | SIZE: %d | TRIES: %d | TIME: %llu]\n", read_cnt, *tmp_buffer, recv, i, t2 - t1);
+
+
+
+
+//    if (enable) cmd.control = CTRL_ENABLE;
+//    else cmd.control = 0;
+//
+//    if (ready) {
+//        cmd.control |= CTRL_READY;
+//        for (int i = 0; i < 3; i++) {
+//            cmd.vel[i] = (float)_velocity_cmd(i) * (float)_scale(i);
+//            cmd.pos[i] = (float)_position_cmd(i) * (float)_scale(i);
+//        }
+//        if (pin_out(0)) cmd.io = IO_00;
+//        else cmd.io = 0;
+//        if (pin_out(1)) cmd.io |= IO_01;
+//        if (pin_out(2)) cmd.io |= IO_02;
+//    } else {
+//        if (!(fb.control & CTRL_DIRSETUP)) {
+//            cmd.control = CTRL_DIRSETUP;
+//            for (int i = 0; i < 3; i++) cmd.pos[i] = _dirsetup(i);
+//        } else if (!(fb.control & CTRL_MAXVEL)) {
+//            cmd.control = CTRL_MAXVEL;
+//            for (int i = 0; i < 3; i++) cmd.pos[i] = (float)_maxvel(i) * (float)_scale(i);
+//        } else if (!(fb.control & CTRL_MAXACC)) {
+//            cmd.control = CTRL_MAXACC;
+//            for (int i = 0; i < 3; i++) cmd.pos[i] = (float)_maxacc(i) * (float)_scale(i);
+//        }
+//    }
+//    memcpy(&txbuf, &cmd, sizeof(cmd));
+//    uint8_t b_xor = 71;
+//    for (int i = 0; i < sizeof(cmd); i++) b_xor ^= txbuf[i];
+//    txbuf[sizeof(cmd)] = b_xor;
+//    
+//   // calisti rtapi_snprintf(txbuf, 65, "%s tevfik", txbuf);
+//    
+//    n = sendto(sockfd, txbuf, sizeof(cmd) + 1, 0, &server, sizeof(server));
+//    packets++;
+//    if (n < 0) ready = 0;
+//    else {
+//        n = recv(sockfd, rxbuf, sizeof(fb), 0);
+//        if (n < 0) ready = 0;
+//        else {
+//            packets--;
+//            memcpy(&fb, &rxbuf, sizeof(fb));
+//            for (int i = 0; i < 3; i++) _position_fb(i) = fb.pos[i] / (float)_scale(i);
+//            for (int i = 0; i < 3; i++) _velocity_fb(i) = fb.vel[i] / (float)_scale(i);
+//            pin_in(0) = fb.io & IO_00;
+//            pin_in(1) = fb.io & IO_01;
+//            pin_in(2) = fb.io & IO_02;
+//            pin_in(3) = fb.io & IO_03;
+//            ready = fb.control & CTRL_READY;
+//        }
+//    }
+//}
+
+	  //~ //double kalman_filter2 (double input);
+	  //~ double kalman_filter2 (double input)
+	  //~ {
+	  //~ //char tampon [250];
+	  //~ static double kalman_old ,cov_old;
+	  //~ double kalman_new = kalman_old; // eski değer alınır
+	  //~ double cov_new = cov_old + 0.50; //yeni kovaryans değeri belirlenir. Q=0.50 alınmıştır
+	
+	  //~ double kalman_gain = cov_new / (cov_new + 0.9); //kalman kazancı hesaplanır. R=0.9 alınmıştır
+	  //~ double kalman_calculated = kalman_new + (kalman_gain * (input - kalman_new)); //kalman değeri hesaplanır
+	
+	  //~ cov_new = (1 - kalman_gain) * cov_old; //yeni kovaryans değeri hesaplanır
+	  //~ cov_old = cov_new; //yeni değerler bir sonraki döngüde kullanılmak üzere kaydedilir
+	
+	  //~ kalman_old = kalman_calculated;
+	
+	 //~ //sprintf(tampon,"  %f:   %f: ",kalman_calculated,kalman_gain);
+	
+	
+	
+	  //~ return kalman_calculated; //hesaplanan kalman değeri çıktı olarak verilir
+	 //~ }
+
+
+//// Sadece çok büyük atlamaları düzelten basit fonksiyon
+//double Aci2Posizyon(double eskiAci, double gelenAci)
+//{
+    //// Önce orjinal fonksiyonu çağır
+    //double yeniAci = Aci2PosizyonOrjinal(eskiAci, gelenAci);
+    
+    //// Değişimi hesapla
+    //double delta = yeniAci - eskiAci;
+        //rtapi_print_msg(RTAPI_MSG_DBG, 
+                   //"AciBuyukAtlamaDuzelt: eski=%.3f, gelen=%.3f, ilk_sonuc=%.3f, delta=%.3f\n",
+                   //eskiAci, gelenAci, yeniAci, delta);
+    //// Çok büyük atlama kontrolü (270 dereceden fazla)
+    //if (fabs(delta) > 120.0) {
+		        //rtapi_print_msg(RTAPI_MSG_ERR, 
+                       //"HATA: Büyük atlama tespit edildi! |delta|=%.3f > 120.0 derece\n",
+                       //fabs(delta));
+        //// Normalize açıları
+        //double n_eski = fmod(eskiAci, 360.0);
+        //double n_gelen = fmod(gelenAci, 360.0);
+        //while (n_eski < 0) n_eski += 360.0;
+        //while (n_gelen < 0) n_gelen += 360.0;
+        
+        //// Farkı hesapla
+        //double delta_norm = n_gelen - n_eski;
+        
+        //// Alternatifleri dene
+        //double delta1 = delta_norm;
+        //double delta2 = delta_norm - 360.0;
+        //double delta3 = delta_norm + 360.0;
+        
+        //// En küçük mutlak değeri seç
+        //double yeniDelta;
+        //if (fabs(delta2) < fabs(delta1) && fabs(delta2) < fabs(delta3)) {
+            //yeniDelta = delta2;
+        //} else if (fabs(delta3) < fabs(delta1) && fabs(delta3) < fabs(delta2)) {
+            //yeniDelta = delta3;
+        //} else {
+            //yeniDelta = delta1;
+        //}
+        
+        //// Düzeltilmiş açı
+        //yeniAci = eskiAci + yeniDelta;
+        
+        //printf("[BASIT DUZELTME] %.1f -> %.1f (delta: %.1f -> %.1f)\n",
+               //eskiAci, yeniAci, delta, yeniDelta);
+    //}
+    
+    //return yeniAci;
+//}
+
+
+
+
+/*
+double Aci2PosizyonOrjinal(double  eskiAci ,double gelenAci)
+{
+double Ayedek;
+double AA=eskiAci;
+float a1, a2, a3;
+
+     Ayedek=AA;
+
+     AA=fmod(AA,360.0);
+     while(AA<0) {AA=AA+360.0;}  // fprintf(ekran,"fmod A =%lf \n",A);
+     a1 =gelenAci; //atan2(dy,dx)*57.295779513;
+     a1=fmod(a1,360.0); while(a1<0) {a1=a1+360.0;}//tanjant 0 arasi 359
+     a1=a1+ (  Ayedek-AA );
+
+     a2 = a1 - 360.0;
+     a3 = a1 + 360.0;
+     AA=Ayedek;
+     if (fabs(AA-a1) < fabs(AA-a2))
+     {
+        if (fabs(AA-a1) < fabs(AA-a3))
+     		AA = a1;
+        else
+     		AA = a3;
+     }
+     else
+     {
+         if (fabs(AA-a2) < fabs(AA-a3))
+    		 AA = a2;
+         else
+    		 AA = a3;
+     }
+
+
+
+return(AA);
+}
+*/
+
+
+
+double Aci2Posizyon(double eskiAci, double gelenAci)
+{
+    double eskiAciMod;
+    double aciFarki;
+    double maxSicrama = 120.0;
+
+    // 1. Gelen açıyı [0, 360) aralığına normalize et
+    gelenAci = fmod(gelenAci, 360.0);
+    if (gelenAci < 0.0) {
+        gelenAci += 360.0;
+    }
+
+    // 2. Eski açının 0-360 aralığındaki modüler karşılığını bul
+    eskiAciMod = fmod(eskiAci, 360.0);
+    if (eskiAciMod < 0.0) {
+        eskiAciMod += 360.0;
+    }
+
+    // 3. İki açı arasındaki en kısa açısal farkı [-180, 180] aralığında hesapla
+    aciFarki = gelenAci - eskiAciMod;
+ 
+    if (aciFarki > 180.0) {
+        aciFarki -= 360.0;
+    } else if (aciFarki < -180.0) {
+        aciFarki += 360.0;
+    }
+
+    // 4. Ani sıçrama kontrolü (180 derece veya daha büyük ani değişimler reddedilir)
+    if (fabs(aciFarki) >= maxSicrama) {
+   
+        return eskiAci; // Hatalı okumada pozisyonu değiştirme aynı kalsın
+    }
+
+    // 5. Kesintisiz eklemeli yeni açıyı döndür
+    return eskiAci + aciFarki;
+}
+
+
+
+
+  //~ //eski_aci_x=checkQuadrant_x(gelen_aci_x);
+//~ double checkQuadrant_x(double  correctedAngle);
+//~ double checkQuadrant_x(double  correctedAngle)
+//~ {
+  //~ /*
+  //~ //Quadrants:
+  //~ 4  |  1
+  //~ ---|---
+  //~ 3  |  2
+  //~ */
+
+//~ static double quadrantNumber;
+//~ static double numberofTurns;
+//~ static int previousquadrantNumber;
+  //~ double totalAngle;
+
+  //~ //Quadrant 1
+  //~ if(correctedAngle >= 0 && correctedAngle <=90)
+  //~ {
+    //~ quadrantNumber = 1;
+  //~ }
+
+  //~ //Quadrant 2
+  //~ if(correctedAngle > 90 && correctedAngle <=180)
+  //~ {
+    //~ quadrantNumber = 2;
+  //~ }
+
+  //~ //Quadrant 3
+  //~ if(correctedAngle > 180 && correctedAngle <=270)
+  //~ {
+    //~ quadrantNumber = 3;
+  //~ }
+
+  //~ //Quadrant 4
+  //~ if(correctedAngle > 270 && correctedAngle <360)
+  //~ {
+    //~ quadrantNumber = 4;
+  //~ }
+  //~ //Serial.print("Quadrant: ");
+  //~ //Serial.println(quadrantNumber); //print our position "quadrant-wise"
+
+  //~ if(quadrantNumber != previousquadrantNumber) //if we changed quadrant
+  //~ {
+    //~ if(quadrantNumber == 1 && previousquadrantNumber == 4)
+    //~ {
+      //~ numberofTurns++; // 4 --> 1 transition: CW rotation
+    //~ }
+
+    //~ if(quadrantNumber == 4 && previousquadrantNumber == 1)
+    //~ {
+      //~ numberofTurns--; // 1 --> 4 transition: CCW rotation
+    //~ }
+    //~ //this could be done between every quadrants so one can count every 1/4th of transition
+
+    //~ previousquadrantNumber = quadrantNumber;  //update to the current quadrant
+  
+  //~ }  
+  //~ //Serial.print("Turns: ");
+  //~ //Serial.println(numberofTurns,0); //number of turns in absolute terms (can be negative which indicates CCW turns)  
+
+  //~ //after we have the corrected angle and the turns, we can calculate the total absolute position
+  //~ totalAngle = (numberofTurns*360) + correctedAngle; //number of turns (+/-) plus the actual angle within the 0-360 range
+  //~ //Serial.print("Total angle: ");
+  //~ //Serial.println(totalAngle, 2); //absolute position of the motor expressed in degree angles, 2 digits
+  //~ return(totalAngle);
+//~ }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  //~ static  float			gelenx1,gelenx2, gelenx3, gelenx4, gelenx5,ortalamax;
+  			//~ gelenx1= gelenx2;
+			//~ gelenx2= gelenx3;
+			//~ gelenx3= gelenx4;
+			//~ gelenx4= gelenx5;
+			//~ gelenx5= 0.017564169  *       (eski_aci_x+ilk_aci_x) ;     
+			//~ ortalamax=(gelenx1+gelenx2+gelenx3+gelenx4+gelenx5)/5;
+			//~ _position_fb(0)=ortalamax;
+
+
+
+
+
+
+
+
+
+
+//alfa_beta  filter wikipedia Güncelleme. Her zaman adımı ΔT için tekrarlayın   float dt = 0.5;
+
+//unsigned long DT, Start_Time, End_Time;
+//Start_Time = millis();
+//End_Time = millis();
+//DT = End_Time - Start_Time;
+
+//float alfa_beta(float xm)
+//{
+//static	long long  tt1,tt1eski;
+	
+	
+	
+	//float dt = 0.5;
+	//float xk_1 = 0, vk_1 = 0, a = 0.5, b = 0.01;
+
+	//float xk, vk, rk;
+	////float xm;
+//tt1 = rtapi_get_time();
+//dt=tt1 -  tt1eski;
+//tt1eski=tt1;
+	//while (1)
+	//{
+		////xm = rand() % 100; // input signal
+
+		//xk = xk_1 + (vk_1 * dt);
+		//vk = vk_1;
+
+		//rk = xm - xk;
+
+		//xk += a * rk;
+		//vk += (b * rk) / dt;
+
+		//xk_1 = xk;
+		//vk_1 = vk;
+
+		////printf("  %f \t  %f \n", xm, xk_1);
+
+		////sleep(1);
+		//return(xk_1);
+	//}
+//}
+//https://github.com/dwrobel/TrivialKalmanFilter/tree/master/examples/DS18B20Test
+//~ double kalman_linuxcnc(double zk)
+    //~ {
+		
+//~ float     Rk =  0.1;
+//~ float     Qk =    1e-4 ;	
+	
+//~ static const double k    = 1;
+//~ static const double Bk   = 0;
+//~ static const double uk   = 0;
+//~ static const double Fk   = 1;
+//~ static const double T    = 1;
+//~ static const double Fk_T = 1; // pow(Fk, T);
+//~ static const double Hk   = 1;
+//~ static const double Hk_T = 1; // pow(Hk, T);
+//~ static const double I    = 1;
+
+		
+		
+        //~ double xk       = (Fk * xk_last) + (Bk * uk); // Predicted (a priori) state estimate
+        //~ double Pk       = (Fk * Pk_last * Fk_T) + Qk; // Predicted (a priori) error covariance
+        //~ double yk       = zk - (Hk * xk);             // Innovation or measurement pre-fit residual
+        //~ const double Sk = Rk + (Hk * Pk * Hk_T);      // Innovation (or pre-fit residual) covariance
+        //~ const double Kk = (Pk * Hk_T) / Sk;           // Optimal Kalman gain
+        //~ xk         = xk + (Kk * yk);             // Updated (a posteriori) state estimate
+        //~ Pk         = (I - (Kk * Hk)) * Pk;       // Updated (a posteriori) estimate covariance (a.k.a Joseph form)
+
+//~ #       if 0                                     // unused part
+            //~ yk     = zk - (Hk_T * xk);           // Measurement post-fit residual
+//~ #       endif
+
+        //~ xk_last    = xk;
+        //~ Pk_last    = Pk;
+        //~ //xk_out     = xk;
+//~ return(xk);
+
+        //~ }
+
+	//double kalman_linuxcnc1(double zk)
+	    //{
+			
+	//float     Rk =  0.1;
+	//float     Qk =    1e-4 ;	
+		
+	//static const double k    = 1;
+	//static const double Bk   = 0;
+	//static const double uk   = 0;
+	//static const double Fk   = 1;
+	//static const double T    = 1;
+	//static const double Fk_T = 1; // pow(Fk, T);
+	//static const double Hk   = 1;
+	//static const double Hk_T = 1; // pow(Hk, T);
+	//static const double I    = 1;
+	
+			
+			
+	        //double xk       = (Fk * xk_last) + (Bk * uk); // Predicted (a priori) state estimate
+	        //double Pk       = (Fk * Pk_last * Fk_T) + Qk; // Predicted (a priori) error covariance
+	        //double yk       = zk - (Hk * xk);             // Innovation or measurement pre-fit residual
+	        //const double Sk = Rk + (Hk * Pk * Hk_T);      // Innovation (or pre-fit residual) covariance
+	        //const double Kk = (Pk * Hk_T) / Sk;           // Optimal Kalman gain
+	        //xk         = xk + (Kk * yk);             // Updated (a posteriori) state estimate
+	        //Pk         = (I - (Kk * Hk)) * Pk;       // Updated (a posteriori) estimate covariance (a.k.a Joseph form)
+	
+	//#       if 0                                     // unused part
+	            //yk     = zk - (Hk_T * xk);           // Measurement post-fit residual
+	//#       endif
+	
+	        //xk_last    = xk;
+	        //Pk_last    = Pk;
+	        ////xk_out     = xk;
+	//return(xk);
+	
+	        //}
+
+
+
+
+	//#define REMOTE_IP "192.168.1.2"
+	//#define REMOTE_UDP_PORT 5000 
+	//stm32 kısmının adresi
+
+//~ ag baglantılarından 
+	//~ kablolu baglantıyı düzenle
+			//~ ipv4 ayarlarından
+				//~ diğer bilgisayar ,le paylaşımlı   kısmı seç
+				//~ 192.168.1.3
+				//~ 255.255.255.0
+				//~ 192.168.1.1  bu kısım silinir ise rotdan çift ip adres olur
+				//~ kaydet
+				
+//~ ag baglantılarından 
+//~ ag yönetiminden yeniden baslat	
+	   
+
+	   
+	   
+
+	   
+
+
+
+

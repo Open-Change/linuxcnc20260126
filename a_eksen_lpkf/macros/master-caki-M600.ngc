@@ -1,0 +1,14 @@
+O<tool-job-begin> SUB
+
+( Dosya adı: tool-job-begin.ngc )
+
+(LinuxCNC Freze Tezgahları için Manuel Takım Değiştirme Alt Programları sürüm 1.1: alt program 2/2 )
+( Yeniden eşlenen bir M600 komutu olarak çalıştırılmak üzere tasarlanmıştır. 
+(Bir sonraki takım değişikliğinin, )
+(M6'nın, bir işin ilk takımı olduğunu belirtmek için kullanılır. )
+
+#<_ToolDidFirst> = 0 (yeni iş, henüz <tool-change>'i ilk kez çağırmadık)
+G49 (açık takım yükseklik ayarı)
+
+O<tool-job-begin> ENDSUB
+M2

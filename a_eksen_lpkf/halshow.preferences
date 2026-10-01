@@ -1,0 +1,58 @@
+# Halshow settings
+# This file is generated automatically.
+wm geometry . 1280x941+0+330
+placeFrames 0.2941640378548896
+set ::ratio 0.2941640378548896
+set ::old_w_leftf 160
+set ::watchlist {
+    pin+stepgen.0.counts
+    pin+udp.xeksen-aci-fb
+    pin+udp.toplamXacisi
+    pin+stepgen.1.counts
+    pin+udp.yeksen-aci-fb
+    pin+udp.toplamYacisi
+    pin+udp.0.position-fb
+    pin+udp.1.position-fb
+    pin+udp.aeksen-aci-fb
+    pin+udp.ozelveri-a
+    pin+udp.toplamAacisi
+    pin+stepgen.3.counts
+    sig+probe-in
+    pin+pwmgen.0.dir
+    pin+pwmgen.0.pwm
+    pin+pwmgen.0.value
+    pin+udp.3.position-fb
+    pin+halui.axis.a.pos-commanded
+    pin+halui.axis.a.pos-feedback
+    pin+halui.axis.a.pos-relative
+    param+stepgen.2.steplen
+    param+stepgen.2.stepspace
+    param+stepgen.2.rawcounts
+    param+stepgen.2.dirhold
+    param+stepgen.2.dirsetup
+    param+stepgen.1.dirhold
+    param+stepgen.1.dirsetup
+    param+stepgen.1.steplen
+    param+stepgen.1.stepspace
+    param+stepgen.0.dirhold
+    param+stepgen.0.dirsetup
+    param+stepgen.0.steplen
+    param+stepgen.0.stepspace
+    pin+joint.3.f-error
+    pin+udp.ZPulseSinyal
+    sig+debounce-probe-in
+    pin+halui.home-all
+    pin+halui.feed-override.direct-value
+    pin+halui.feed-override.decrease
+    pin+halui.feed-override.increase
+    pin+halui.feed-override.scale
+    pin+halui.feed-override.value
+    pin+udp.packets
+}
+set ::workmode showhal
+set ::watchInterval 100
+set ::col1_width 100
+set ::ffmts 
+set ::ifmts 
+set ::alwaysOnTop 0
+set ::autoSaveWatchlist 1

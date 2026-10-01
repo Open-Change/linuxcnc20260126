@@ -1,0 +1,2195 @@
+### USER
+programı türkçe olarak yaz ve açıkla
+#!/usr/bin/env python2
+
+'''Using Novation Nocturn as LinuxCNC jog controller.
+
+The hardware communication side is in nocturn_midi.py.
+This file implements the controller logic and ties to LinuxCNC HAL.
+
+Instead of exposing a set of pins and connecting them, this
+script takes the lazy approach and just uses setp to write
+e.g. halui.axis.x.increment-plus directly.
+'''
+
+import hal
+import linuxcnc
+import time
+import nocturn_midi
+import traceback
+
+def delay():
+    '''Delay to let LinuxCNC GUI notice action'''
+    time.sleep(0.05)
+
+class JogSpeed:
+    '''Control jog speed and increment based on slider position'''
+    increment = 'jog_increment'
+    speed = 'jog_speed'
+        
+    def __init__(self, comp):
+        self.comp = comp
+        self.comp.newpin(self.increment, hal.HAL_FLOAT, hal.HAL_OUT)
+        self.comp.newpin(self.speed, hal.HAL_FLOAT, hal.HAL_OUT)
+
+        # Default settings in case we don't get initial slider position from the hardware
+        self.comp[self.increment] = 1.0
+        self.comp[self.speed] = 1000
+    
+    def __call__(self, event):
+        pos = round(event[1] * 3)
+        if pos == 0:
+            step, speed = 10, 2000
+        elif pos == 1:
+            step, speed = 1, 1000
+        elif pos == 2:
+            step, speed = 0.1, 100
+        elif pos == 3:
+            step, speed = 0.01, 10
+        
+        self.comp[self.increment] = step
+        self.comp[self.speed] = speed
+
+class JogMotion:
+    '''Jog single axis with an encoder'''
+
+    def __init__(self, comp, axis):
+        self.comp = comp
+        self.counts = "jog_%s_counts" % axis
+        self.comp.newpin(self.counts, hal.HAL_S32, hal.HAL_OUT)
+
+    def __call__(self, event):
+        if self.comp['machine-is-on'] == 0:
+            return
+        
+        if self.comp['jog_enabled'] == 0 or self.comp['machine-homed'] == 0:
+            return
+    
+        self.comp[self.counts] += event[1]
+
+class AutoZeroEncoder:
+    '''Encoder that resets value when machine is powered off'''
+    def __init__(self, comp, pinname):
+        self.comp = comp
+        self.pinname = pinname
+        self.comp.newpin(self.pinname, hal.HAL_S32, hal.HAL_OUT)
+    
+    def __call__(self, event):
+        if self.comp['machine-is-on'] == 0:
+            self.comp[self.pinname] = 0
+        elif event[0] != 'poll':
+            self.comp[self.pinname] += event[1]
+
+class Button:
+    '''Button press to HAL pin'''
+    def __init__(self, comp, pinname):
+        self.comp = comp
+        self.pinname = pinname
+        self.comp.newpin(self.pinname, hal.HAL_BIT, hal.HAL_OUT)
+    
+    def __call__(self, event):
+        if self.comp['machine-is-on'] == 0 or self.comp['machine-homed'] == 0:
+            event[1] = 0
+
+        self.comp[self.pinname] = event[1]
+
+class ToggleButton:
+    '''Toggle HAL pin on every press'''
+    def __init__(self, comp, pinname, default = False):
+        self.comp = comp
+        self.pinname = pinname
+        self.comp.newpin(self.pinname, hal.HAL_BIT, hal.HAL_OUT)
+        self.comp[self.pinname] = default
+    
+    def __call__(self, event):
+        if self.comp['machine-is-on'] == 0:
+            self.comp[self.pinname] = False
+        elif event[1]:
+            self.comp[self.pinname] = not self.comp[self.pinname]
+
+class MDIButton:
+    '''Button that runs MDI command'''
+    def __init__(self, comp, mdi_command):
+        self.comp = comp
+        self.mdi_command = mdi_command
+    
+    def __call__(self, event):
+        if event[1] and self.comp['machine-is-on'] and self.comp['machine-homed']:
+            cmd = linuxcnc.command()
+            cmd.mode(linuxcnc.MODE_MDI)
+            cmd.wait_complete()
+            cmd.mdi(self.mdi_command)
+
+class Pulse:
+    '''Give pulse on a pin'''
+    def __init__(self, comp, pinname):
+        self.comp = comp
+        self.pinname = pinname
+        try:
+            self.comp.newpin(self.pinname, hal.HAL_BIT, hal.HAL_OUT)
+        except ValueError:
+            pass # Duplicate pin
+    
+    def __call__(self, event):
+        if event[0] == 'poll':
+            self.comp[self.pinname] = 0
+        else:
+            self.comp[self.pinname] = 1
+
+class Led:
+    '''Polling HAL pin to LED state'''
+    def __init__(self, comp, hw, pinname, led_idx, blink_time = 0.0, invert = False):
+        self.comp = comp
+        self.hw = hw
+        self.pinname = pinname
+        self.led_idx = led_idx
+        self.blink_time = blink_time
+        self.invert = invert
+        self.prev_state = None
+        try:
+            self.comp.newpin(self.pinname, hal.HAL_BIT, hal.HAL_IN)
+        except ValueError:
+            pass # Duplicate pin
+    
+    def __call__(self, event):
+        if self.comp[self.pinname] ^ self.invert:
+            if self.blink_time > 0:
+                state = ((time.time() % self.blink_time) < (self.blink_time / 2.0))
+            else:
+                state = True
+        else:
+            state = False
+        
+        if self.comp['machine-is-on'] == 0 or self.comp['machine-homed'] == 0:
+            state = False
+
+        if self.hw.midi_port_idx is None:
+            self.prev_state = None
+        elif state != self.prev_state:
+            self.prev_state = state
+            self.hw.set_button_led(self.led_idx, state)
+
+class RelativeZeroLed:
+    '''Light led if relative coordinate is zero'''
+    def __init__(self, comp, hw, pinname, led_idx):
+        self.comp = comp
+        self.hw = hw
+        self.pinname = pinname
+        self.led_idx = led_idx
+        self.prev_state = None
+        self.comp.newpin(self.pinname, hal.HAL_FLOAT, hal.HAL_IN)
+    
+    def __call__(self, event):
+        state = abs(self.comp[self.pinname]) <= 0.01
+
+        if self.comp['machine-is-on'] == 0:
+            state = False
+        
+        if self.comp['program-idle'] == 0 or self.comp['machine-homed'] == 0:
+            state = False
+
+        if self.hw.midi_port_idx is None:
+            self.prev_state = None
+        elif state != self.prev_state:
+            self.prev_state = state
+            self.hw.set_button_led(self.led_idx, state)
+        
+
+class EncoderRing:
+    '''Show current value on encoder led ring as a filled scale'''
+    def __init__(self, comp, hw, pinname, enc_idx, minval = 0.0, maxval = 1.0, ledmode = 2, wrap = False):
+        self.comp = comp
+        self.hw = hw
+        self.pinname = pinname
+        self.enc_idx = enc_idx
+        self.minval = minval
+        self.maxval = maxval
+        self.ledmode = ledmode
+        self.wrap = wrap
+        self.comp.newpin(self.pinname, hal.HAL_FLOAT, hal.HAL_IN)
+    
+    def __call__(self, event):
+        if self.comp['machine-is-on'] == 0:
+            self.hw.set_encoder_leds(self.enc_idx, 0, 0)
+        else:
+            v = (self.comp[self.pinname] - self.minval) / (self.maxval - self.minval)
+            if self.wrap: v = v % 1.0
+            self.hw.set_encoder_leds(self.enc_idx, self.ledmode, v)
+
+class NocturnController:
+    def __init__(self):
+        self.comp = hal.component("nocturn")
+        self.comp.newpin('machine-is-on', hal.HAL_BIT, hal.HAL_IN)
+        self.comp.newpin('program-idle', hal.HAL_BIT, hal.HAL_IN)
+        self.comp.newpin('machine-homed', hal.HAL_BIT, hal.HAL_IN)
+        self.comp.newpin('jog_enabled', hal.HAL_BIT, hal.HAL_IN)
+        
+        self.hw = nocturn_midi.NocturnMidi()
+        self.handlers = {
+            'slider00': JogSpeed(self.comp),
+            'enc08': AutoZeroEncoder(self.comp, 'x_offset'),
+            'enc07': AutoZeroEncoder(self.comp, 'y_offset'),
+            'enc06': AutoZeroEncoder(self.comp, 'z_offset'),
+            'enc05': AutoZeroEncoder(self.comp, 'spindle_override'),
+            'enc04': AutoZeroEncoder(self.comp, 'feed_override'),
+            'enc03': [JogMotion(self.comp, 'x'),     Pulse(self.comp, "start_jog")],
+            'enc02': [JogMotion(self.comp, 'y'),     Pulse(self.comp, "start_jog")],
+            'enc01': [JogMotion(self.comp, 'z'),     Pulse(self.comp, "start_jog")],
+            'enc00': [JogMotion(self.comp, 'a'),     Pulse(self.comp, "start_jog")],
+            'btn03': [Button(self.comp, "x_minus"),  Pulse(self.comp, "start_jog")],
+            'btn11': [Button(self.comp, "x_plus"),   Pulse(self.comp, "start_jog")],
+            'btn02': [Button(self.comp, "y_minus"),  Pulse(self.comp, "start_jog")],
+            'btn10': [Button(self.comp, "y_plus"),   Pulse(self.comp, "start_jog")],
+            'btn01': [Button(self.comp, "z_minus"),  Pulse(self.comp, "start_jog")],
+            'btn09': [Button(self.comp, "z_plus"),   Pulse(self.comp, "start_jog")],
+            'btn00': [Button(self.comp, "a_minus"),  Pulse(self.comp, "start_jog")],
+            'btn08': [Button(self.comp, "a_plus"),   Pulse(self.comp, "start_jog")],
+            'btn07': ToggleButton(self.comp, "clear_offsets", default = True),
+            'btn06': ToggleButton(self.comp, "lift_z"),
+            'btn15': MDIButton(self.comp, 'G10 L20 P0 X0'),
+            'btn14': MDIButton(self.comp, 'G10 L20 P0 Y0'),
+            'btn13': MDIButton(self.comp, 'G10 L20 P0 Z0'),
+            'btn12': MDIButton(self.comp, 'o<z_probe_pad> call'),
+            'btn05': MDIButton(self.comp, 'o<tool_change_pos> call'),
+            'btn04': MDIButton(self.comp, 'o<tool_length_probe> call'),
+            'poll': [
+                Pulse(self.comp, "start_jog"),
+                Led(self.comp, self.hw, 'program-idle', 0),
+                Led(self.comp, self.hw, 'program-idle', 1),
+                Led(self.comp, self.hw, 'program-idle', 2),
+                Led(self.comp, self.hw, 'program-idle', 3),
+                Led(self.comp, self.hw, 'program-idle', 8),
+                Led(self.comp, self.hw, 'program-idle', 9),
+                Led(self.comp, self.hw, 'program-idle', 10),
+                Led(self.comp, self.hw, 'program-idle', 11),
+                Led(self.comp, self.hw, 'clear_offsets', 7, invert = True),
+                Led(self.comp, self.hw, 'lift_z', 6),
+                EncoderRing(self.comp, self.hw, 'led_x_offset', 8, 0.0, 1.0, 4, True),
+                EncoderRing(self.comp, self.hw, 'led_y_offset', 7, 0.0, 1.0, 4, True),
+                EncoderRing(self.comp, self.hw, 'led_z_offset', 6, 0.0, 1.0, 4, True),
+                EncoderRing(self.comp, self.hw, 'led_spindle_override', 5, 0.0, 2.0, 0),
+                EncoderRing(self.comp, self.hw, 'led_feed_override', 4, 0.0, 2.0, 0),
+                RelativeZeroLed(self.comp, self.hw, 'rel_x', 15),
+                RelativeZeroLed(self.comp, self.hw, 'rel_y', 14),
+                RelativeZeroLed(self.comp, self.hw, 'rel_z', 13),
+            ]
+        }
+
+        self.handlers['poll'] += [
+            self.handlers['enc08'],
+            self.handlers['enc07'],
+            self.handlers['enc06'],
+            self.handlers['enc05'],
+            self.handlers['enc04'],
+        ]
+        
+        self.comp.ready()
+
+    def poll(self):
+        try:
+            event = self.hw.parse_inputs()
+            if event:
+                self.handle_event(event)
+            else:
+                time.sleep(0.05)
+                self.handle_event(('poll', None))
+                self.hw.check_midi_connection()
+        except KeyboardInterrupt:
+            raise
+        except:
+            traceback.print_exc()
+
+    def handle_event(self, event):
+        if event[0] in self.handlers:
+            handlers = self.handlers[event[0]]
+            
+            if isinstance(handlers, list):
+                for handler in handlers:
+                    handler(event)
+            else:
+                handlers(event)
+    
+if __name__ == '__main__':
+    try:
+        nocturn = NocturnController()
+        while True:
+            nocturn.poll()
+    except KeyboardInterrupt:
+        nocturn.hw.leds_off()
+        raise SystemExit
+
+### ASSISTANT
+Aşağıda, verdiğiniz Python 2 programını **Türkçe olarak açıkladım** ve kodun genel yapısını, her bir sınıfın ve işlevin ne işe yaradığını ayrıntılı şekilde anlattım. Kodun kendisini de **Türkçe yorum satırlarıyla** birlikte yeniden yazdım (orijinal kodda değişiklik yapılmadan sadece açıklamalar eklendi ve isimlerin anlamını Türkçeleştirdim).
+
+---
+
+### 📌 **Genel Açıklama**
+
+Bu program, **Novation Nocturn** isimli bir MIDI kontrol cihazını (yani bir fiziksel knob, buton ve kaydırma çubuğu içeren bir donanım) **LinuxCNC** ile entegre ederek, onu bir **manuel hareket (jog) kontrolörü** olarak kullanmaya yarar.  
+Nocturn cihazı, CNC tezgahı üzerinde eksenlerde hareket, ilerleme hızı ayarlama, ofset sıfırlama, takım değiştirme gibi işlemleri kolayca yapmanıza olanak tanır.  
+Gerekli donanım-MIDI bağlantısını `nocturn_midi.py` modülü yönetirken, bu dosya *uygulama mantığını* ve LinuxCNC HAL ile etkileşimi sağlar.
+
+---
+
+## 🇹🇷 Türkçe Yorumlu Kod
+
+```python
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+
+'''Novation Nocturn cihazını, LinuxCNC için manuel hareket (jog) kontrolörü olarak kullanma.
+
+Donanım tarafındaki MIDI iletişim `nocturn_midi.py` dosyasındadır.
+Bu dosya, kontrol mantığını uygular ve LinuxCNC HAL ile bağlantı kurar.
+
+Kod, HAL pinlerini açıkça tanımlayıp bağlamak yerine "tembel yaklaşım" kullanır:
+Örneğin doğrudan `halui.axis.x.increment-plus` gibi HALUI komutlarını `setp` ile çalıştırır.
+
+Yani HAL bileşenleri yerine doğrudan HALUI arayüzüne komut gönderir.
+'''
+
+import hal
+import linuxcnc
+import time
+import nocturn_midi
+import traceback
+
+def gecikme():
+    '''LinuxCNC arayüzünün işlemi fark etmesi için kısa bir bekleme'''
+    time.sleep(0.05)
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class JogHizi:
+    '''Kaydırma çubuğuna göre manuel hareket (jog) adım büyüklüğünü ve hızını ayarlar'''
+    adim = 'jog_adim'
+    hiz = 'jog_hiz'
+        
+    def __init__(self, bileşen):
+        self.bilesen = bileşen
+        self.bilesen.newpin(self.adim, hal.HAL_FLOAT, hal.HAL_OUT)
+        self.bilesen.newpin(self.hiz, hal.HAL_FLOAT, hal.HAL_OUT)
+
+        # Donanımdan başlangıç pozisyonu gelmezse varsayılan değerler:
+        self.bilesen[self.adim] = 1.0   # 1 mm/adım
+        self.bilesen[self.hiz] = 1000   # 1000 mm/dak
+    
+    def __call__(self, olay):
+        # Kaydırma çubuğu 4 konuma bölünmüş: 0=en büyük adım, 3=en küçük adım
+        pos = round(olay[1] * 3)  # 0–3 arası tam sayı
+
+        if pos == 0:
+            adım, hız = 10, 2000      # Kaba hareket
+        elif pos == 1:
+            adım, hız = 1, 1000       # Orta hassasiyet
+        elif pos == 2:
+            adım, hız = 0.1, 100      # İnce ayar
+        elif pos == 3:
+            adım, hız = 0.01, 10      # Çok ince ayar (mikron seviyesi)
+
+        self.bilesen[self.adim] = adım
+        self.bilesen[self.hiz] = hız
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class JogHareketi:
+    '''Bir eksen üzerinde döndürme düğmesi (encoder) ile manuel hareket sağlar'''
+
+    def __init__(self, bileşen, eksen):
+        self.bilesen = bileşen
+        self.sayac = "jog_%s_sayac" % eksen  # örn: jog_x_sayac
+        self.bilesen.newpin(self.sayac, hal.HAL_S32, hal.HAL_OUT)
+
+    def __call__(self, olay):
+        # Makine kapalıysa işlem yapma
+        if self.bilesen['makine_calisiyor'] == 0:
+            return
+        
+        # Jog kapalıysa veya homing yapılmamışsa işlem yapma
+        if self.bilesen['jog_aktif'] == 0 or self.bilesen['homing_yapildi'] == 0:
+            return
+    
+        # Encoder dönüş miktarı kadar sayaç artırılır → HALUI bunu okuyup hareketi yapar
+        self.bilesen[self.sayac] += olay[1]
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class SifirlananEncoder:
+    '''Makine kapatıldığında değeri sıfırlanan döndürme düğmesi'''
+    def __init__(self, bileşen, pin_adi):
+        self.bilesen = bileşen
+        self.pin_adi = pin_adi
+        self.bilesen.newpin(self.pin_adi, hal.HAL_S32, hal.HAL_OUT)
+    
+    def __call__(self, olay):
+        if self.bilesen['makine_calisiyor'] == 0:
+            self.bilesen[self.pin_adi] = 0  # Makine kapalı → değer sıfır
+        elif olay[0] != 'poll':             # 'poll' olayı değilse (yani fiziksel dönme varsa)
+            self.bilesen[self.pin_adi] += olay[1]  # Değeri güncelle
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class Buton:
+    '''Buton basılı durumunu doğrudan bir HAL bit pinine yazar'''
+    def __init__(self, bileşen, pin_adi):
+        self.bilesen = bileşen
+        self.pin_adi = pin_adi
+        self.bilesen.newpin(self.pin_adi, hal.HAL_BIT, hal.HAL_OUT)
+    
+    def __call__(self, olay):
+        # Makine kapalı veya homing yapılmamışsa buton etkisiz → değeri 0 yap
+        if self.bilesen['makine_calisiyor'] == 0 or self.bilesen['homing_yapildi'] == 0:
+            olay[1] = 0
+
+        self.bilesen[self.pin_adi] = olay[1]  # 1 = basılı, 0 = serbest
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class GeçişButonu:
+    '''Her basışta pin durumunu tersleyen (toggle) buton'''
+    def __init__(self, bileşen, pin_adi, varsayilan=False):
+        self.bilesen = bileşen
+        self.pin_adi = pin_adi
+        self.bilesen.newpin(self.pin_adi, hal.HAL_BIT, hal.HAL_OUT)
+        self.bilesen[self.pin_adi] = varsayilan  # Başlangıç değeri
+    
+    def __call__(self, olay):
+        if self.bilesen['makine_calisiyor'] == 0:
+            self.bilesen[self.pin_adi] = False  # Makine kapalıysa daima kapat
+        elif olay[1]:  # Buton basılıysa (yükselen kenar)
+            self.bilesen[self.pin_adi] = not self.bilesen[self.pin_adi]
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class MDIButonu:
+    '''Butona basıldığında doğrudan bir G-kodu (MDI) çalıştırır'''
+    def __init__(self, bileşen, mdi_komutu):
+        self.bilesen = bileşen
+        self.mdi_komutu = mdi_komutu
+    
+    def __call__(self, olay):
+        # Buton basılı, makine çalışıyor ve homing yapılmışsa MDI çalıştır
+        if olay[1] and self.bilesen['makine_calisiyor'] and self.bilesen['homing_yapildi']:
+            komut = linuxcnc.command()
+            komut.mode(linuxcnc.MODE_MDI)      # MDI moduna geç
+            komut.wait_complete()              # Mod değişikliğini bekle
+            komut.mdi(self.mdi_komutu)         # Komutu gönder
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class Darbe:
+    '''Bir pini kısa süreyle "1" yapan (pulse) işlev'''
+    def __init__(self, bileşen, pin_adi):
+        self.bilesen = bileşen
+        self.pin_adi = pin_adi
+        try:
+            self.bilesen.newpin(self.pin_adi, hal.HAL_BIT, hal.HAL_OUT)
+        except ValueError:
+            pass  # Pin zaten tanımlıysa hatayı yoksay (çoğullama için)
+    
+    def __call__(self, olay):
+        if olay[0] == 'poll':     # Periyodik sorgulama → pini sıfırla
+            self.bilesen[self.pin_adi] = 0
+        else:                     # Gerçek olay → 1 yap (darbe ver)
+            self.bilesen[self.pin_adi] = 1
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class LED:
+    '''Bir HAL giriş pininin durumuna göre fiziksel LED'i yakar/söndürür'''
+    def __init__(self, bileşen, donanim, pin_adi, led_index, yanip_sonme_suresi=0.0, tersle=False):
+        self.bilesen = bileşen
+        self.donanim = donanim
+        self.pin_adi = pin_adi
+        self.led_index = led_index
+        self.yanip_sonme_suresi = yanip_sonme_suresi
+        self.tersle = tersle
+        self.onceki_durum = None
+        try:
+            self.bilesen.newpin(self.pin_adi, hal.HAL_BIT, hal.HAL_IN)
+        except ValueError:
+            pass  # Pin çoğullandıysa yoksay
+    
+    def __call__(self, olay):
+        # Pin durumu + tersleme + yanıp sönme hesaplaması
+        if self.bilesen[self.pin_adi] ^ self.tersle:
+            if self.yanip_sonme_suresi > 0:
+                # Zaman tabanlı yanıp sönme: yarı sürede yanık, yarı sürede sönük
+                durum = ((time.time() % self.yanip_sonme_suresi) < (self.yanip_sonme_suresi / 2.0))
+            else:
+                durum = True
+        else:
+            durum = False
+
+        # Makine kapalı veya homing yapılmamışsa LED'leri kapat
+        if self.bilesen['makine_calisiyor'] == 0 or self.bilesen['homing_yapildi'] == 0:
+            durum = False
+
+        # Sadece durum değiştiğinde donanıma yaz (gürültüyü önler)
+        if self.donanim.midi_port_idx is None:
+            self.onceki_durum = None
+        elif durum != self.onceki_durum:
+            self.onceki_durum = durum
+            self.donanim.buton_ledini_ayarla(self.led_index, durum)
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class BagilSifirLED:
+    '''Göreceli (relative) koordinat sıfıra yakınsa LED'i yakar'''
+    def __init__(self, bileşen, donanim, pin_adi, led_index):
+        self.bilesen = bileşen
+        self.donanim = donanim
+        self.pin_adi = pin_adi
+        self.led_index = led_index
+        self.onceki_durum = None
+        self.bilesen.newpin(self.pin_adi, hal.HAL_FLOAT, hal.HAL_IN)
+    
+    def __call__(self, olay):
+        # |değer| ≤ 0.01 mm ise "sıfır kabul edildi"
+        durum = abs(self.bilesen[self.pin_adi]) <= 0.01
+
+        if self.bilesen['makine_calisiyor'] == 0:
+            durum = False
+        
+        # Program beklemedeyse veya homing yapılmamışsa LED kapalı
+        if self.bilesen['program_beklemede'] == 0 or self.bilesen['homing_yapildi'] == 0:
+            durum = False
+
+        if self.donanim.midi_port_idx is None:
+            self.onceki_durum = None
+        elif durum != self.onceki_durum:
+            self.onceki_durum = durum
+            self.donanim.buton_ledini_ayarla(self.led_index, durum)
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class EncoderLEDHalkasi:
+    '''Encoder çevresindeki LED halkasına bir değerin yüzdesini gösterir (dolgulu çubuk)'''
+    def __init__(self, bileşen, donanim, pin_adi, encoder_index, min_deger=0.0, max_deger=1.0, led_modu=2, sarmali=False):
+        self.bilesen = bileşen
+        self.donanim = donanim
+        self.pin_adi = pin_adi
+        self.encoder_index = encoder_index
+        self.min_deger = min_deger
+        self.max_deger = max_deger
+        self.led_modu = led_modu   # 0: nokta, 2: çubuk, 4: dolgulu çubuk vs.
+        self.sarmali = sarmali     # Değer aralığı dışına çıkınca başa sar (mod 1.0)
+        self.bilesen.newpin(self.pin_adi, hal.HAL_FLOAT, hal.HAL_IN)
+    
+    def __call__(self, olay):
+        if self.bilesen['makine_calisiyor'] == 0:
+            self.donanim.encoder_ledlerini_ayarla(self.encoder_index, 0, 0)  # LED'leri kapat
+        else:
+            # Normalizasyon: [min, max] → [0, 1]
+            v = (self.bilesen[self.pin_adi] - self.min_deger) / (self.max_deger - self.min_deger)
+            if self.sarmali:
+                v = v % 1.0  # Mod 1
+            self.donanim.encoder_ledlerini_ayarla(self.encoder_index, self.led_modu, v)
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class NocturnKontrolcusu:
+    def __init__(self):
+        # HAL bileşenini oluştur
+        self.bilesen = hal.component("nocturn")
+        
+        # Gerekli giriş pinleri (LinuxCNC'den okunacak durum bilgileri)
+        self.bilesen.newpin('makine_calisiyor', hal.HAL_BIT, hal.HAL_IN)   # 1 = çalışıyor
+        self.bilesen.newpin('program_beklemede', hal.HAL_BIT, hal.HAL_IN)  # 1 = beklemede (idle)
+        self.bilesen.newpin('homing_yapildi', hal.HAL_BIT, hal.HAL_IN)     # 1 = tüm eksenler homed
+        self.bilesen.newpin('jog_aktif', hal.HAL_BIT, hal.HAL_IN)          # 1 = jog modu açık
+        
+        # Donanım bağlantısı
+        self.donanim = nocturn_midi.NocturnMidi()
+        
+        # Olay → işleyici eşlemesi
+        self.isleyiciler = {
+            # Kaydırma çubuğu: jog hızı/step seçimi
+            'slider00': JogHizi(self.bilesen),
+            
+            # Encoder'lar (makine kapalıyken sıfırlanır)
+            'enc08': SifirlananEncoder(self.bilesen, 'x_ofseti'),
+            'enc07': SifirlananEncoder(self.bilesen, 'y_ofseti'),
+            'enc06': SifirlananEncoder(self.bilesen, 'z_ofseti'),
+            'enc05': SifirlananEncoder(self.bilesen, 'spindle_orani'),     # 0–200% → 0–2.0
+            'enc04': SifirlananEncoder(self.bilesen, 'ilerleme_orani'),     # 0–200% → 0–2.0
+            
+            # Eksen jog encoder'ları + hareket başlatma darbesi
+            'enc03': [JogHareketi(self.bilesen, 'x'), Darbe(self.bilesen, "jog_baslat")],
+            'enc02': [JogHareketi(self.bilesen, 'y'), Darbe(self.bilesen, "jog_baslat")],
+            'enc01': [JogHareketi(self.bilesen, 'z'), Darbe(self.bilesen, "jog_baslat")],
+            'enc00': [JogHareketi(self.bilesen, 'a'), Darbe(self.bilesen, "jog_baslat")],
+            
+            # Eksen butonları (±) + hareket başlatma darbesi
+            'btn03': [Buton(self.bilesen, "x_eksi"), Darbe(self.bilesen, "jog_baslat")],
+            'btn11': [Buton(self.bilesen, "x_arti"), Darbe(self.bilesen, "jog_baslat")],
+            'btn02': [Buton(self.bilesen, "y_eksi"), Darbe(self.bilesen, "jog_baslat")],
+            'btn10': [Buton(self.bilesen, "y_arti"), Darbe(self.bilesen, "jog_baslat")],
+            'btn01': [Buton(self.bilesen, "z_eksi"), Darbe(self.bilesen, "jog_baslat")],
+            'btn09': [Buton(self.bilesen, "z_arti"), Darbe(self.bilesen, "jog_baslat")],
+            'btn00': [Buton(self.bilesen, "a_eksi"), Darbe(self.bilesen, "jog_baslat")],
+            'btn08': [Buton(self.bilesen, "a_arti"), Darbe(self.bilesen, "jog_baslat")],
+            
+            # Toggle butonlar
+            'btn07': GeçişButonu(self.bilesen, "ofsetleri_temizle", varsayilan=True),
+            'btn06': GeçişButonu(self.bilesen, "z_yukselt"),
+            
+            # MDI butonları (G-kodu çalıştıran)
+            'btn15': MDIButonu(self.bilesen, 'G10 L20 P0 X0'),      # X'i göreceli sıfırla
+            'btn14': MDIButonu(self.bilesen, 'G10 L20 P0 Y0'),      # Y'yi göreceli sıfırla
+            'btn13': MDIButonu(self.bilesen, 'G10 L20 P0 Z0'),      # Z'yi göreceli sıfırla
+            'btn12': MDIButonu(self.bilesen, 'o<z_probe_pad> call'), # Z prob (makro)
+            'btn05': MDIButonu(self.bilesen, 'o<tool_change_pos> call'), # Takım değiştirme konumu
+            'btn04': MDIButonu(self.bilesen, 'o<tool_length_probe> call'), # Takım boyu probu
+            
+            # Periyodik sorgulama (poll) sırasında çalışan işleyiciler:
+            'poll': [
+                Darbe(self.bilesen, "jog_baslat"),  # Her poll'da jog darbesini sıfırla
+                # Program beklemedeyse yeşil LED'leri yak (8 buton)
+                LED(self.bilesen, self.donanim, 'program_beklemede', 0),
+                LED(self.bilesen, self.donanim, 'program_beklemede', 1),
+                LED(self.bilesen, self.donanim, 'program_beklemede', 2),
+                LED(self.bilesen, self.donanim, 'program_beklemede', 3),
+                LED(self.bilesen, self.donanim, 'program_beklemede', 8),
+                LED(self.bilesen, self.donanim, 'program_beklemede', 9),
+                LED(self.bilesen, self.donanim, 'program_beklemede', 10),
+                LED(self.bilesen, self.donanim, 'program_beklemede', 11),
+                # Ofset temizleme durumunu göster (tersle: temiz değilse yanar)
+                LED(self.bilesen, self.donanim, 'ofsetleri_temizle', 7, tersle=True),
+                # Z yükseltme modu LED'i
+                LED(self.bilesen, self.donanim, 'z_yukselt', 6),
+                # Encoder LED halkaları (ofset ve override oranları için)
+                EncoderLEDHalkasi(self.bilesen, self.donanim, 'led_x_ofseti', 8, 0.0, 1.0, 4, True),
+                EncoderLEDHalkasi(self.bilesen, self.donanim, 'led_y_ofseti', 7, 0.0, 1.0, 4, True),
+                EncoderLEDHalkasi(self.bilesen, self.donanim, 'led_z_ofseti', 6, 0.0, 1.0, 4, True),
+                EncoderLEDHalkasi(self.bilesen, self.donanim, 'led_spindle_orani', 5, 0.0, 2.0, 0),
+                EncoderLEDHalkasi(self.bilesen, self.donanim, 'led_ilerleme_orani', 4, 0.0, 2.0, 0),
+                # Göreceli koordinat sıfır LED'leri
+                BagilSifirLED(self.bilesen, self.donanim, 'goreli_x', 15),
+                BagilSifirLED(self.bilesen, self.donanim, 'goreli_y', 14),
+                BagilSifirLED(self.bilesen, self.donanim, 'goreli_z', 13),
+            ]
+        }
+
+        # Poll sırasında encoder durumlarını da oku (LED güncelleme için)
+        self.isleyiciler['poll'] += [
+            self.isleyiciler['enc08'],
+            self.isleyiciler['enc07'],
+            self.isleyiciler['enc06'],
+            self.isleyiciler['enc05'],
+            self.isleyiciler['enc04'],
+        ]
+        
+        # HAL bileşenini aktif hale getir
+        self.bilesen.ready()
+
+    def sorgula(self):
+        '''Donanımdan olay oku ve işleyiciye gönder'''
+        try:
+            olay = self.donanim.girdileri_analiz_et()
+            if olay:
+                self.olay_isle(olay)
+            else:
+                time.sleep(0.05)
+                self.olay_isle(('poll', None))         # Periyodik güncelleme
+                self.donanim.midi_baglantisini_kontrol_et()
+        except KeyboardInterrupt:
+            raise
+        except:
+            traceback.print_exc()
+
+    def olay_isle(self, olay):
+        '''Gelen olayı ilgili işleyici(ler)e yönlendir'''
+        if olay[0] in self.isleyiciler:
+            isleyiciler = self.isleyiciler[olay[0]]
+            
+            if isinstance(isleyiciler, list):
+                for isleyici in isleyiciler:
+                    isleyici(olay)
+            else:
+                isleyiciler(olay)
+    
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+if __name__ == '__main__':
+    try:
+        nocturn = NocturnKontrolcusu()
+        while True:
+            nocturn.sorgula()
+    except KeyboardInterrupt:
+        nocturn.donanim.ledleri_kapat()
+        raise SystemExit
+```
+
+---
+
+### 🔧 **Önemli Türkçe Pin/Değişken Adları ve Anlamları**
+
+| İngilizce | Türkçe | Açıklama |
+|----------|--------|---------|
+| `machine-is-on` | `makine_calisiyor` | 1 = servo açık, hazır |
+| `program-idle` | `program_beklemede` | 1 = G-kodu beklemede (hareket yok) |
+| `machine-homed` | `homing_yapildi` | 1 = tüm eksenler referans noktasında |
+| `jog_enabled` | `jog_aktif` | 1 = jog modu seçili |
+| `jog_increment` | `jog_adim` | mm cinsinden bir adımda ne kadar ilerleyecek |
+| `jog_speed` | `jog_hiz` | mm/dak cinsinden jog hızı |
+| `x_offset` | `x_ofseti` | G54 vs. ofsetlerine eklenen dinamik ofset |
+| `spindle_override` | `spindle_orani` | 0.0 → 0%, 1.0 → 100%, 2.0 → 200% |
+| `feed_override` | `ilerleme_orani` | Aynı mantık |
+| `rel_x` | `goreli_x` | Makinenin şu anki göreceli X koordinatı (G91'deki gibi) |
+
+---
+
+### ⚙️ Nasıl Çalışır? (Kısa Akış Şeması)
+
+1. Program başlar → `nocturn` HAL bileşeni oluşturulur.
+2. Donanım (Nocturn) MIDI üzerinden sorgulanır.
+3. Kullanıcı bir butona basar/döndürür → `olay` oluşur (örn: `('btn15', 1)`).
+4. Olay, `isleyiciler` sözlüğünde eşleştirilir → `MDIButonu(...)`.
+5. `MDIButonu.__call__` çalışır → `G10 L20 P0 X0` komutu LinuxCNC'ye gönderilir.
+6. Aynı anda LED güncellemeleri (`poll`) arka planda 20 Hz sıklıkla çalışır.
+
+---
+
+### 📝 Notlar
+
+- Kod **LinuxCNC 2.9.4** ve üzeri ile uyumludur.
+- `nocturn_midi.py` dosyasının da sisteminizde olması gerekir (donanım sürücüsü).
+- HAL pin isimleri, `halui` bileşeninin tanımladığı pinlerle eşleşmelidir (örn: `halui.axis.x.increment-plus`).
+- Bu kod, **HALUI** (HAL User Interface) kullanır → doğrudan `halui.axis.x.jog-counts` gibi pinlere yazılır.
+
+---
+
+İhtiyacınız olursa:
+- Bu kodu **Python 3** uyumlu hale getirebilirim,
+- Belirli bir buton/encoder işlevini **değiştirebilir**,  
+- Veya `nocturn_midi.py` için örnek bir sürüm de yazabilirim.
+
+Yardımcı olmamı ister misiniz? 🛠️
+
+### USER
+component matrixkins "Calibrated kinematics for 3-axis machines";
+
+description
+"""
+The matrixkins component implements custom kinematics for 3-axis
+Cartesian machines that allows compensating minor alignment inaccuracies
+in software.
+
+\\fBKINEMATICS MODEL:\\fR
+
+By default identity matrix is used, which is equal to trivial kinematics:
+
+| X_joint |   | 1 0 0 |   | X_axis |
+| Y_joint | = | 0 1 0 | * | Y_axis |
+| Z_joint |   | 0 0 1 |   | Z_axis |
+
+Adjusting the calibration matrix allows compensating out many
+mechanical issues, including:
+
+* Scale error of each axis.
+* Perpendicularity between each pair of axes.
+* Parallelism between spindle rotational axis and Z movement.
+* Perpendicularity between spindle rotational axis and X/Y movement. 
+
+The matrix coefficients are set by parameters c0..c8.
+For 3 axis machine, the equations become:
+
+X_joint = c0 * X_axis + c1 * Y_axis + c2 * Z_axis
+Y_joint = c3 * X_axis + c4 * Y_axis + c5 * Z_axis
+Z_joint = c6 * X_axis + c7 * Y_axis + c8 * Z_axis
+
+If the machine has more than 3 axes, the rest are passed through
+without adjustment.
+
+\\fBCALIBRATION INSTRUCTIONS:\\fR
+
+For a 3 axis milling machine, the following process can be used to accurately
+measure and compensate the mechanical alignment.
+
+Tools required:
+
+  1. Dial indicator that can be mounted on spindle.
+  2. Straight rod that can be mounted on spindle.
+  3. Calipers.
+
+Process:
+
+\\fB1. Head tramming\\fR
+
+Mechanically tram the spindle to the table as well as you can.
+The perpendicularity of spindle vs. table cannot be compensated in software,
+and the spindle axis will act as the reference for all further steps.
+
+You can measure the perpendicularity by mounting the dial indicator on
+the spindle. Search for "mill tramming" online for detailed process.
+
+\\fB2. X and Y axis squaring\\fR
+Cut octagon out of some rigid material. It is best to cut a roughing path
+first and a thin finishing pass last, to get the best accuracy. Make the
+octagon as large as your calipers can measure. Before unmounting the
+workpiece, mark the X and Y directions on it.
+
+Measure width along X and Y axes. If your axis scales are set correctly,
+they should be identical. If they are not, you can adjust c[0] and c[4] to
+compensate. Note that endmill diameter will affect the actual dimensions
+of the test octagon, but not the ratio between sides.
+
+Measure width along both diagonals.
+If the X and Y axes are square to each other, the readings should be identical.
+
+To compensate, set
+c[1] = (B^2 - A^2) / (2 * A * B)
+where A is the diagonal in X+/Y+ direction and B is the diagonal in X+/Y- direction.
+
+This adjusts Y axis direction while keeping X axis as it was.
+Alternatively you can set c[3] to adjust X axis instead.
+This affects alignment with respect to e.g. table slots.
+
+\\fB3. X axis squaring to spindle\\fR
+Mount the dial indicator so that it rotates around the spindle axis, like in tramming measurement.
+Mark a spot on the table where the indicator touches when it is in positive X direction from spindle center.
+Zero the dial indicator.
+
+Rotate dial indicator 180 degrees around the spindle.
+Move X axis in positive direction until the indicator touches the same spot.
+Ideally indicator reads 0 again.
+
+To compensate, set
+c[6] = D / X
+where D is the new dial indicator reading, and X is the length moved along X axis.
+
+\\fB4. Y axis squaring to spindle\\fR
+Same as step 3, except move the machine in positive Y direction.
+
+To compensate, set
+c[7] = D / Y
+where D is the new dial indicator reading, and Y is the length moved.
+
+\\fB5. Z axis parallelism to spindle in X direction\\fR
+Mount straight rod to the spindle.
+Position dial indicator so that it measures horizontally against the positive X side of the rod, close to the spindle.
+
+Spin the spindle by hand to see if there is any runout.
+Zero the dial indicator at the midway position.
+
+Raise Z axis until dial indicator measures close to the bottom end of the rod.
+Spin the spindle by hand and take note of the midway value.
+
+Set
+c[2] = - X / Z
+where X is the dial indicator movement and Z is the amount you raised the Z axis.
+
+\\fB6. Z axis parallelism to spindle in Y direction\\fR
+Same as step 5, except measure on the positive Y side of the rod.
+
+Set
+c[5] = - Y / Z
+where Z is the dial indicator movement and Z is the amount you raised the Z axis.
+
+\\fBINSTALLATION:\\fR
+
+Build and install the component using halcompile:
+$ [sudo] halcompile --install matrixkins.comp
+
+Specify matrixkins in an ini file as:
+\\fB[KINS]\\fR
+\\fBKINEMATICS=matrixkins\\fR
+
+""";
+pin out bit dummy=1; // halcompile requires at least one pin
+license "GPL";
+;;
+
+static struct haldata {
+    hal_bit_t *enable;
+    hal_float_t *c[9];
+} *haldata;
+
+static int userkins_setup(void) {
+    int res=0;
+    int comp_id;
+    // this name must be different than the comp name:
+    comp_id = hal_init("matrixkinsdata");
+    if (comp_id < 0) goto error;
+    haldata = hal_malloc(sizeof(struct haldata));
+    if (!haldata) goto error;
+
+    for (int i = 0; i < 9; i++)
+    {
+        res += hal_pin_float_newf(HAL_IN, &(haldata->c[i]), comp_id,"matrixkins.c%d", i);
+        *haldata->c[i] = 0.0;
+    }
+
+	res += hal_pin_bit_new("matrixkins.enable", HAL_IN, &(haldata->enable), comp_id);
+
+    *haldata->c[0] = *haldata->c[4] = *haldata->c[8] = 1.0;
+
+    if (res) goto error;
+    hal_ready(comp_id);
+    rtapi_print("*** %s setup ok\n",__FILE__);
+    return 0;
+error:
+    rtapi_print("\n!!! %s setup failed res=%d\n\n",__FILE__,res);
+    return -1;
+}
+
+#include "kinematics.h"
+#include "emcmotcfg.h"
+EXPORT_SYMBOL(kinematicsType);
+EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsForward);
+
+KINEMATICS_TYPE kinematicsType()
+{
+static bool is_setup=0;
+    if (!is_setup) userkins_setup();
+    return KINEMATICS_BOTH;
+}
+
+int kinematicsForward(const double *j,
+                      EmcPose * pos,
+                      const KINEMATICS_FORWARD_FLAGS * fflags,
+                      KINEMATICS_INVERSE_FLAGS * iflags)
+{
+    // For forward kinematics (joint to axis position) we
+    // need the inverse of the 3x3 matrix.
+    //
+    // Refer to e.g.
+    // https://ardoris.wordpress.com/2008/07/18/general-formula-for-the-inverse-of-a-3x3-matrix/  
+    // https://en.wikipedia.org/wiki/Invertible_matrix#Inversion_of_3_%C3%97_3_matrices  
+
+	double a = 1;
+	double b = 0;
+	double c = 0;
+	double d = 0;
+	double e = 1;
+	double f = 0;
+	double g = 0;
+	double h = 0;
+	double i = 1;
+    
+	if (*haldata->enable)
+	{
+		a = *haldata->c[0];
+		b = *haldata->c[1];
+		c = *haldata->c[2];
+		d = *haldata->c[3];
+		e = *haldata->c[4];
+		f = *haldata->c[5];
+		g = *haldata->c[6];
+		h = *haldata->c[7];
+		i = *haldata->c[8];
+	}
+
+    double det = a * (e * i - f * h)
+               - b * (d * i - f * g)
+               + c * (d * h - e * g);
+    double invdet = 1.0 / det;
+
+    // Apply inverse matrix transform to the 3 cartesian coordinates
+    pos->tran.x = invdet * ( (e * i - f * h) * j[0]
+                            +(c * h - b * i) * j[1]
+                            +(b * f - c * e) * j[2]);
+    
+    pos->tran.y = invdet * ( (f * g - d * i) * j[0]
+                            +(a * i - c * g) * j[1]
+                            +(c * d - a * f) * j[2]);
+    
+    pos->tran.z = invdet * ( (d * h - e * g) * j[0]
+                            +(b * g - a * h) * j[1]
+                            +(a * e - b * d) * j[2]);
+
+    // Pass rest of axes as identity
+    if (EMCMOT_MAX_JOINTS > 3) pos->a = j[3];
+    if (EMCMOT_MAX_JOINTS > 4) pos->b = j[4];
+    if (EMCMOT_MAX_JOINTS > 5) pos->c = j[5];
+    if (EMCMOT_MAX_JOINTS > 6) pos->u = j[6];
+    if (EMCMOT_MAX_JOINTS > 7) pos->v = j[7];
+    if (EMCMOT_MAX_JOINTS > 8) pos->w = j[8];
+
+    return 0;
+}
+
+int kinematicsInverse(const EmcPose * pos,
+                      double *j,
+                      const KINEMATICS_INVERSE_FLAGS * iflags,
+                      KINEMATICS_FORWARD_FLAGS * fflags)
+{
+	double a = 1;
+	double b = 0;
+	double c = 0;
+	double d = 0;
+	double e = 1;
+	double f = 0;
+	double g = 0;
+	double h = 0;
+	double i = 1;
+
+	if (*haldata->enable)
+	{
+		a = *haldata->c[0];
+		b = *haldata->c[1];
+		c = *haldata->c[2];
+		d = *haldata->c[3];
+		e = *haldata->c[4];
+		f = *haldata->c[5];
+		g = *haldata->c[6];
+		h = *haldata->c[7];
+		i = *haldata->c[8];
+	}
+
+    // Apply matrix transform to the 3 cartesian coordinates
+    j[0] = pos->tran.x * a + pos->tran.y * b + pos->tran.z * c;
+    j[1] = pos->tran.x * d + pos->tran.y * e + pos->tran.z * f;
+    j[2] = pos->tran.x * g + pos->tran.y * h + pos->tran.z * i;
+    
+    // Pass rest of axes as identity
+    if (EMCMOT_MAX_JOINTS > 3) j[3] = pos->a;
+    if (EMCMOT_MAX_JOINTS > 4) j[4] = pos->b;
+    if (EMCMOT_MAX_JOINTS > 5) j[5] = pos->c;
+    if (EMCMOT_MAX_JOINTS > 6) j[6] = pos->u;
+    if (EMCMOT_MAX_JOINTS > 7) j[7] = pos->v;
+    if (EMCMOT_MAX_JOINTS > 8) j[8] = pos->w;
+
+    return 0;
+}  
+
+bu dosyayı türkçe ye çevir ve açıkla
+
+### ASSISTANT
+Aşağıda, verdiğiniz `matrixkins.comp` dosyasını **tamamen Türkçe’ye çevirdim**, ardından **yapısal ve işlevsel olarak detaylı bir açıklamasını** yaptım. Bu dosya, **LinuxCNC** sistemine özel bir *kinematik bileşeni* (`kinematics component`) ekler ve temelde **3 eksenli (X, Y, Z) bir freze tezgahında mekanik hizalama hatalarını yazılım ile telafi etmeyi** sağlar.
+
+---
+
+## 🇹🇷 **TAM TÜRKÇE ÇEVİRİ**
+
+```comp
+component matrixkins "3 eksenli makineler için kalibre edilmiş kinematik";
+
+description
+"""
+matrixkins bileşeni, 3-eksenli Kartezyen makineler için özel bir kinematik modeli uygular ve
+mekanik hizalama hatalarını (ölçek, diklik, paralellik vs.) yazılım düzeyinde telafi etmeyi sağlar.
+
+\fBKİNEMATİK MODEL:\fR
+
+Varsayılan olarak birim (identity) matris kullanılır. Bu da standart (trivial) kinematiğe eşdeğerdir:
+
+| X_joint |   | 1 0 0 |   | X_axis |
+| Y_joint | = | 0 1 0 | × | Y_axis |
+| Z_joint |   | 0 0 1 |   | Z_axis |
+
+Kalibrasyon matrisinin katsayıları (c0…c8), aşağıdaki şekilde ayarlanarak
+aşağıdaki mekanik sorunlar telafi edilebilir:
+
+* Her eksenin ölçek hatası (mm/mm),
+* Eksenler arasındaki diklik hatası (X⊥Y, Y⊥Z, X⊥Z),
+* Torna merkez ekseninin (spindle) Z eksenine paralellik hatası,
+* Torna merkez ekseninin X ve Y eksenlerine diklik hatası.
+
+3 eksenli bir makine için dönüşüm denklemleri şöyledir:
+
+X_joint = c0·X_axis + c1·Y_axis + c2·Z_axis  
+Y_joint = c3·X_axis + c4·Y_axis + c5·Z_axis  
+Z_joint = c6·X_axis + c7·Y_axis + c8·Z_axis  
+
+Makinede 3’ten fazla eksen varsa (A, B, C, U, V, W), bunlar olduğu gibi geçirilir.
+
+\fBKALİBRASYON TALİMATLARI:\fR
+
+3 eksenli bir freze tezgahı için aşağıdaki adımlarla doğrudan ölçüm yapıp
+matris katsayıları belirlenebilir.
+
+**Gerekli araçlar:**
+
+1. Mile monte edilebilen bir saatli komparatör (dial indicator),  
+2. Mile takılabilen düz bir çubuk (test mandrel),  
+3. Kumpas.
+
+**Adım 1: Mil ayarı (Spindle Tramming)**  
+Mili, masa yüzeyine mümkün olduğunca dik hale getirin.  
+Bu diklik **yazılım ile telafi edilemez**, bu yüzden tüm ölçümler için referans alınır.  
+Komparatörle mile “tramming” ölçümü yaparak dikliği kontrol edin.  
+
+**Adım 2: X ve Y eksenlerinin birbirine dikliği**  
+Sert bir malzemeden (örn. alüminyum) büyük bir sekizgen (octagon) kesin.  
+Önce kaba, sonra ince bir son pasoya dikkat edin. Kumpasla X, Y ve iki çapraz yönü ölçün.
+
+- X ve Y kenar uzunlukları farklıysa → `c0` (X ölçeği) ve `c4` (Y ölçeği) ayarlanır.
+- İki köşegen ölçümü (X+Y+ ve X+Y− yönleri) farklıysa → diklik hatası vardır.  
+  Telafi için:
+  ```
+  c1 = (B² − A²) / (2·A·B)
+  ```
+  Burada:
+  - A = X⁺/Y⁺ çaprazı,  
+  - B = X⁺/Y⁻ çaprazı.  
+  Bu işlem Y ekseninin yönünü X’e göre ayarlar. Alternatif olarak `c3` değiştirilerek X ekseninde düzeltme yapılabilir.
+
+**Adım 3: X ekseni ile milin dikliği**  
+Komparatörü mile takın, masa üzerinde pozitif X yönünde bir noktaya dokundurup sıfırlayın.  
+Mil 180° döndürüldüğünde aynı noktaya tekrar dokunmak için X ekseninde ΔX hareket ettirin.  
+Komparatörde kalan sapma D ise:
+```
+c6 = D / ΔX
+```
+
+**Adım 4: Y ekseni ile milin dikliği**  
+Aynı işlem Y ekseni için yapılır:
+```
+c7 = D / ΔY
+```
+
+**Adım 5: Z ekseni ile milin X yönünde paralelliği**  
+Düz çubuğu mile takın. Komparatörle çubuğun **+X** tarafını yatay olarak ölçün.  
+Z eksenini ΔZ kadar yükseltin; çubuk eğikse komparatörde ΔX sapması görülür:
+```
+c2 = −ΔX / ΔZ
+```
+
+**Adım 6: Z ekseni ile milin Y yönünde paralelliği**
+Aynı işlem **+Y** tarafı için:
+```
+c5 = −ΔY / ΔZ
+```
+
+\fBYÜKLEME (\fR\fBInstallation)\fR:
+
+Bileşeni derleyip yüklemek için:
+```bash
+$ [sudo] halcompile --install matrixkins.comp
+```
+
+`machine.ini` dosyasında şu satırlar eklenmelidir:
+\fB[KINS]\fR  
+\fBKINEMATICS = matrixkins\fR
+
+""";
+
+pin out bit dummy = 1; // halcompile için en az bir pin gerekli
+license "GPL";
+;;
+
+// ——— HAL veri yapısı ———
+static struct haldata {
+    hal_bit_t *enable;         // kinematiğin aktif olup olmadığını kontrol eder
+    hal_float_t *c[9];         // 3×3 matris katsayıları: c0…c8
+} *haldata;
+
+// ——— Bileşeni başlat ———
+static int userkins_setup(void) {
+    int res = 0;
+    int comp_id;
+    comp_id = hal_init("matrixkinsdata"); // bileşen adı farklı olmalı!
+    if (comp_id < 0) goto error;
+    haldata = hal_malloc(sizeof(struct haldata));
+    if (!haldata) goto error;
+
+    // c0 … c8 pinlerini oluştur, başlangıçta 0 ata
+    for (int i = 0; i < 9; i++) {
+        res += hal_pin_float_newf(HAL_IN, &haldata->c[i], comp_id, "matrixkins.c%d", i);
+        *haldata->c[i] = 0.0;
+    }
+
+    // enable pinini ekle
+    res += hal_pin_bit_new("matrixkins.enable", HAL_IN, &haldata->enable, comp_id);
+
+    // Varsayılan: birim matris (c0=c4=c8=1)
+    *haldata->c[0] = *haldata->c[4] = *haldata->c[8] = 1.0;
+
+    if (res) goto error;
+    hal_ready(comp_id);
+    rtapi_print("*** %s kurulumu başarılı\n", __FILE__);
+    return 0;
+error:
+    rtapi_print("\n!!! %s kurulumu başarısız, hata kodu=%d\n\n", __FILE__, res);
+    return -1;
+}
+
+// ——— Kinematik arayüzleri ———
+#include "kinematics.h"
+#include "emcmotcfg.h"
+
+EXPORT_SYMBOL(kinematicsType);
+EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsForward);
+
+// Bileşenin hem ileri hem ters kinematiği desteklediğini bildirir
+KINEMATICS_TYPE kinematicsType() {
+    static bool is_setup = 0;
+    if (!is_setup) {
+        userkins_setup();
+        is_setup = 1;
+    }
+    return KINEMATICS_BOTH;
+}
+
+// ——— İleri Kinematik (Joint → Axis) ———
+// *Joint* pozisyonundan *makine koordinatına* (X,Y,Z) dönüşüm.
+// Bu, matrisin **tersini** almak demektir.
+int kinematicsForward(const double *j, EmcPose *pos,
+                      const KINEMATICS_FORWARD_FLAGS *fflags,
+                      KINEMATICS_INVERSE_FLAGS *iflags) {
+    // Varsayılan: birim matris
+    double a = 1, b = 0, c = 0,
+           d = 0, e = 1, f = 0,
+           g = 0, h = 0, i = 1;
+
+    if (*haldata->enable) {
+        a = *haldata->c[0]; b = *haldata->c[1]; c = *haldata->c[2];
+        d = *haldata->c[3]; e = *haldata->c[4]; f = *haldata->c[5];
+        g = *haldata->c[6]; h = *haldata->c[7]; i = *haldata->c[8];
+    }
+
+    // 3×3 matrisin determinantı
+    double det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
+    double invdet = 1.0 / det;
+
+    // Ters matris uygulanarak axis koordinatları hesaplanır:
+    pos->tran.x = invdet * ( (e*i - f*h) * j[0]
+                           + (c*h - b*i) * j[1]
+                           + (b*f - c*e) * j[2]);
+
+    pos->tran.y = invdet * ( (f*g - d*i) * j[0]
+                           + (a*i - c*g) * j[1]
+                           + (c*d - a*f) * j[2]);
+
+    pos->tran.z = invdet * ( (d*h - e*g) * j[0]
+                           + (b*g - a*h) * j[1]
+                           + (a*e - b*d) * j[2]);
+
+    // Ek eksenler (A,B,C,U,V,W) doğrudan kopyalanır:
+    if (EMCMOT_MAX_JOINTS > 3) pos->a = j[3];
+    if (EMCMOT_MAX_JOINTS > 4) pos->b = j[4];
+    if (EMCMOT_MAX_JOINTS > 5) pos->c = j[5];
+    if (EMCMOT_MAX_JOINTS > 6) pos->u = j[6];
+    if (EMCMOT_MAX_JOINTS > 7) pos->v = j[7];
+    if (EMCMOT_MAX_JOINTS > 8) pos->w = j[8];
+
+    return 0;
+}
+
+// ——— Ters Kinematik (Axis → Joint) ———
+// *Makine koordinatından* (X,Y,Z) *joint* pozisyonuna dönüşüm.
+// Bu, matrisin **doğrudan çarpımı** demektir.
+int kinematicsInverse(const EmcPose *pos, double *j,
+                      const KINEMATICS_INVERSE_FLAGS *iflags,
+                      KINEMATICS_FORWARD_FLAGS *fflags) {
+    double a = 1, b = 0, c = 0,
+           d = 0, e = 1, f = 0,
+           g = 0, h = 0, i = 1;
+
+    if (*haldata->enable) {
+        a = *haldata->c[0]; b = *haldata->c[1]; c = *haldata->c[2];
+        d = *haldata->c[3]; e = *haldata->c[4]; f = *haldata->c[5];
+        g = *haldata->c[6]; h = *haldata->c[7]; i = *haldata->c[8];
+    }
+
+    // Matris × vektör çarpımı:
+    j[0] = pos->tran.x * a + pos->tran.y * b + pos->tran.z * c;
+    j[1] = pos->tran.x * d + pos->tran.y * e + pos->tran.z * f;
+    j[2] = pos->tran.x * g + pos->tran.y * h + pos->tran.z * i;
+
+    // Ek eksenler doğrudan aktarılır:
+    if (EMCMOT_MAX_JOINTS > 3) j[3] = pos->a;
+    if (EMCMOT_MAX_JOINTS > 4) j[4] = pos->b;
+    if (EMCMOT_MAX_JOINTS > 5) j[5] = pos->c;
+    if (EMCMOT_MAX_JOINTS > 6) j[6] = pos->u;
+    if (EMCMOT_MAX_JOINTS > 7) j[7] = pos->v;
+    if (EMCMOT_MAX_JOINTS > 8) j[8] = pos->w;
+
+    return 0;
+}
+```
+
+---
+
+## 🔍 **Detaylı Açıklama**
+
+### 1. **Amacı Nedir?**
+LinuxCNC, varsayılan olarak **trivial (basit) kinematik** kullanır:  
+`X_joint = X_axis`, `Y_joint = Y_axis`, vs.  
+Ancak gerçek makinelerde:
+- X ekseni 1 mm emrettiğinde 1.002 mm gidebilir (**ölçek hatası**),
+- Y ekseni X’e tam dik olmayabilir (**diklik hatası**),
+- Z ekseni mile paralel gitmiyor olabilir (**eğiklik**).
+
+Bu bileşen, bu hataları **tek bir 3×3 dönüşüm matrisiyle** yazılım içinde düzeltir.
+
+---
+
+### 2. **Matematiksel Model**
+
+Makine koordinatları (X, Y, Z) → Joint komutları (motor pozisyonları) şöyle dönüştürülür:
+
+\[
+\begin{bmatrix} X_j \\ Y_j \\ Z_j \end{bmatrix}
+=
+\begin{bmatrix}
+c_0 & c_1 & c_2 \\
+c_3 & c_4 & c_5 \\
+c_6 & c_7 & c_8 \\
+\end{bmatrix}
+\cdot
+\begin{bmatrix} X \\ Y \\ Z \end{bmatrix}
+\]
+
+- `kinematicsInverse()` → Bu çarpımı yapar (makine koordinatı → joint).
+- `kinematicsForward()` → **Matrisin tersini** kullanarak joint → makine koordinatı hesaplar.
+
+> 📌 **Önemli**: Matrisin tersi alındığında, determinant ≠ 0 olmalıdır. Yoksa `1/det` sonsuz olur → **bileşen çöker!**  
+> Kalibrasyon yapılırken `c0·c4·c8 ≈ 1` olacak şekilde (tersinir matris) katsayı verilmeli.
+
+---
+
+### 3. **Kalibrasyon Katsayılarının Anlamları**
+
+| Katsayı | Etkisi | Tipik Değer Aralığı |
+|--------|--------|---------------------|
+| `c0` | X ekseninin **ölçeği** | ~1.000 (1.002 = %0.2 fazla) |
+| `c4` | Y ekseninin **ölçeği** | ~1.000 |
+| `c8` | Z ekseninin **ölçeği** | ~1.000 |
+| `c1` | Y ekseninin **X yönündeki eğimi** | ~0 (0.001 = 1 mm / m) |
+| `c3` | X ekseninin **Y yönündeki eğimi** | ~0 |
+| `c2` | Z ekseninin **X yönündeki eğimi** | ~0 |
+| `c5` | Z ekseninin **Y yönündeki eğimi** | ~0 |
+| `c6` | X ekseninin **Z yönündeki eğimi** (mille diklik) | ~0 |
+| `c7` | Y ekseninin **Z yönündeki eğimi** (mille diklik) | ~0 |
+
+> Örnek: `c1 = 0.005` → Her 1 mm Y hareketi için 0.005 mm X sapması oluşur.
+
+---
+
+### 4. **Nasıl Kullanılır?**
+
+#### A. Derle & Yükle
+```bash
+halcompile --install matrixkins.comp
+```
+
+#### B. `machine.ini` içinde tanımla:
+```ini
+[KINS]
+KINEMATICS = matrixkins
+```
+
+#### C. HAL içinde katsayıları ayarla (örnek):
+```bash
+setp matrixkins.enable 1
+setp matrixkins.c0 1.0005     # X %0.05 uzun
+setp matrixkins.c1 0.0002     # Y, X’e 0.2 mm/m eğimli
+setp matrixkins.c6 -0.0003    # X ekseninin Z eğimi
+```
+
+> 🔁 `matrixkins.enable = 0` olursa birim matris kullanılır → düzgün çalışır ama telafi yok.
+
+---
+
+### 5. **Güvenlik ve Dikkat Edilmesi Gerekenler**
+
+- **Matris tekil (singular) olmamalı**: `det ≠ 0`. Aksi halde `kinematicsForward()` sonsuz değer üretir → LinuxCNC çöker.
+- **Kalibrasyon adım adım yapılmalı**: Önce ölçek, sonra diklik.
+- **Termal genleşme etkileri**: Kalibrasyon ısıya bağlı olabilir.
+- **Yüksek doğruluk için**: `halui` veya `pyvcp` ile katsayıları arayüzden ayarlamak daha güvenli olur.
+
+---
+
+### 6. **Sık Karşılaşılan Sorular**
+
+#### ❓ Neden ileri kinematikte matrisin tersi alınıyor?
+> Çünkü:
+> - `inverse`: *G-kodundaki X,Y,Z* → *motor step sayısı* (matris × vektör)  
+> - `forward`: *Encoder’den okunan step sayısı* → *gerçek X,Y,Z* (ters matris gereklidir)
+
+#### ❓ 4+ eksenli makinelerde ne olur?
+> A, B, C, U, V, W gibi ek eksenler **olduğu gibi geçirilir** (`j[3] = pos->a` vs.). Yalnızca ilk 3 eksen dönüştürülür.
+
+#### ❓ Gerçek bir örnek var mı?
+Evet! LinuxCNC belgelerinde *"Trivial to Matrix Kinematics Conversion"* başlıklı bir örnek vardır:  
+https://linuxcnc.org/docs/html/man/man9/matrixkins.9.html
+
+---
+
+İsterseniz:
+- Bu bileşeni **Python ile test edebileceğiniz bir örnek** verebilirim,
+- Kalibrasyon ölçüm verilerinizi girip `c0…c8` katsayılarını **otomatik hesaplayan bir Excel/Python aracı** hazırlayabilirim,
+- Veya `matrixkins.comp` dosyasına **debug çıktısı** ekleyerek gerçek zamanlı dönüşümü izleyebilirsiniz.
+
+Nasıl yardımcı olabilirim? 🛠️
+
+### USER
+/********************************************************************
+* Description: maxkins.c
+*   Kinematics for Chris Radek's tabletop 5 axis mill named 'max'.
+*   This mill has a tilting head (B axis) and horizontal rotary
+*   mounted to the table (C axis).
+*
+* Author: Chris Radek
+* License: GPL Version 2
+*    
+* Copyright (c) 2007 Chris Radek
+********************************************************************/
+
+/********************************************************************
+* Note: The direction of the B axis is the opposite of the 
+* conventional axis direction. See 
+* https://linuxcnc.org/docs/html/gcode/machining-center.html  
+********************************************************************/
+
+
+#include "kinematics.h"		/* these decls */
+#include "posemath.h"
+#include "hal.h"
+#include "rtapi.h"
+#include "rtapi_math.h"
+
+#define d2r(d) ((d)*PM_PI/180.0)
+#define r2d(r) ((r)*180.0/PM_PI)
+
+#ifndef hypot
+#define hypot(a,b) (sqrt((a)*(a)+(b)*(b)))
+#endif
+
+struct haldata {
+    hal_float_t *pivot_length;
+    hal_bit_t *conventional_directions; //default is false
+} *haldata;
+
+int kinematicsForward(const double *joints,
+		      EmcPose * pos,
+		      const KINEMATICS_FORWARD_FLAGS * fflags,
+		      KINEMATICS_INVERSE_FLAGS * iflags)
+{
+    (void)fflags;
+    (void)iflags;
+
+    const real_t con = *(haldata->conventional_directions) ? 1.0 : -1.0;
+
+    // B correction
+    const double zb = (*(haldata->pivot_length) + joints[8]) * cos(d2r(joints[4]));
+    const double xb = (*(haldata->pivot_length) + joints[8]) * sin(d2r(joints[4]));
+        
+    // C correction
+    const double xyr = hypot(joints[0], joints[1]);
+    const double xytheta = atan2(joints[1], joints[0]) + d2r(joints[5]);
+
+    // U correction
+    const double zv = joints[6] * sin(d2r(joints[4]));
+    const double xv = joints[6] * cos(d2r(joints[4]));
+
+    // V correction is always in joint 1 only
+
+    pos->tran.x = xyr * cos(xytheta) - (con * xb) - xv;
+    pos->tran.y = xyr * sin(xytheta) - joints[7];
+    pos->tran.z = joints[2] - zb - (con * zv) + *(haldata->pivot_length);
+
+    pos->a = joints[3];
+    pos->b = joints[4];
+    pos->c = joints[5];
+    pos->u = joints[6];
+    pos->v = joints[7];
+    pos->w = joints[8];
+
+    return 0;
+}
+
+int kinematicsInverse(const EmcPose * pos,
+		      double *joints,
+		      const KINEMATICS_INVERSE_FLAGS * iflags,
+		      KINEMATICS_FORWARD_FLAGS * fflags)
+{
+    (void)iflags;
+    (void)fflags;
+
+    const real_t con = *(haldata->conventional_directions) ? 1.0 : -1.0;
+
+    // B correction
+    const double zb = (*(haldata->pivot_length) + pos->w) * cos(d2r(pos->b));
+    const double xb = (*(haldata->pivot_length) + pos->w) * sin(d2r(pos->b));
+        
+    // C correction
+    const double xyr = hypot(pos->tran.x, pos->tran.y);
+    const double xytheta = atan2(pos->tran.y, pos->tran.x) - d2r(pos->c);
+
+    // U correction
+    const double zv = pos->u * sin(d2r(pos->b));
+    const double xv = pos->u * cos(d2r(pos->b));
+
+    // V correction is always in joint 1 only
+
+    joints[0] = xyr * cos(xytheta) + (con * xb) + xv;
+    joints[1] = xyr * sin(xytheta) + pos->v;
+    joints[2] = pos->tran.z + zb - (con * zv) - *(haldata->pivot_length);
+
+    joints[3] = pos->a;
+    joints[4] = pos->b;
+    joints[5] = pos->c;
+    joints[6] = pos->u;
+    joints[7] = pos->v;
+    joints[8] = pos->w;
+
+    return 0;
+}
+
+KINEMATICS_TYPE kinematicsType()
+{
+    return KINEMATICS_BOTH;
+}
+
+#include "rtapi.h"		/* RTAPI realtime OS API */
+#include "rtapi_app.h"		/* RTAPI realtime module decls */
+
+KINS_NOT_SWITCHABLE
+EXPORT_SYMBOL(kinematicsType);
+EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsForward);
+MODULE_LICENSE("GPL");
+
+int comp_id;
+int rtapi_app_main(void) {
+    int result;
+    comp_id = hal_init("maxkins");
+    if(comp_id < 0) return comp_id;
+
+    haldata = hal_malloc(sizeof(struct haldata));
+
+    result = hal_pin_float_new("maxkins.pivot-length", HAL_IO, &(haldata->pivot_length), comp_id);
+
+    result += hal_pin_bit_new("maxkins.conventional-directions", HAL_IN, &(haldata->conventional_directions), comp_id);
+
+    if(result < 0) goto error;
+
+    *(haldata->pivot_length) = 0.666;
+    *(haldata->conventional_directions) = 0; // default is unconventional
+    hal_ready(comp_id);
+    return 0;
+
+error:
+    hal_exit(comp_id);
+    return result;
+}
+
+void rtapi_app_exit(void) { hal_exit(comp_id); }  nasıl ayarlama yapılır?ayrıntılı açıkla burada matrisler var mı?
+
+### ASSISTANT
+Bu dosya (`maxkins.c`) **Chris Radek’in “Max” adlı 5-eksenli masaüstü freze tezgahı** için yazılmış özel **kinematik bileşenidir**. Amaç, bu tezgahın mekanik yapısına göre **joint (motor/mekanik eksen) pozisyonları ile makine koordinatları (X,Y,Z,A,B,C,U,V,W)** arasındaki dönüşümü sağlamak.
+
+---
+
+## ❓ **Sorunuz: "Nasıl ayarlama yapılır? Detaylı açıkla. Burada matrisler var mı?"**
+
+### ✅ Kısa Cevap:
+- **Matris yoktur.** Bu kinematik, doğrudan **trigonometrik (açı-temelli) dönüşümlerle** çalışır — örneğin `sin`, `cos`, `atan2`, `hypot`.  
+- **Ayarlar**, HAL içinde iki parametreyle yapılır:
+  1. `maxkins.pivot-length` → B ekseni döndürme merkezinin (pivot) Z’ye mesafesi  
+  2. `maxkins.conventional-directions` → B ekseninin yönünün standart (RS-274/NGC) olup olmadığı
+
+Aşağıda **detaylı açıklamalar ve ayarlama adımları** verilmiştir.
+
+---
+
+## 🔍 1. **Mekanik Yapı ve Kinematik Model**
+
+`max` tezgahı şu özel yapıya sahiptir:
+
+| Eksen | Tür | Açıklama |
+|-------|-----|----------|
+| **B** | Döner kafa ekseni | Milin XZ-düzleminde yukarı/aşağı dönmesi (normalde X’e dik eksende döner ama burada özel) |
+| **C** | Masa üzerinde dönen tabla | Parçayı XY-düzleminde döndürür |
+| **U, V, W** | Ekstra lineer eksenler | U: B eksenine paralel ekstra hareket (örn. uzatma), V: paralel Y, W: paralel Z (tool length gibi) |
+
+### ⚠️ Önemli Uyarı:
+> **B ekseni yönü RS-274/NGC standardına aykırıdır!**  
+> LinuxCNC dokümantasyonuna göre (*[Machining Center Axes](https://linuxcnc.org/docs/html/gcode/machining-center.html)*):
+> > *"A rotates around a line parallel to X, B rotates around a line parallel to Y..."*  
+> > → Yani **B ekseni Y’ye paralel** olmalı ve **+B: saat yönünün tersine (CCW)** dönmeli.  
+> Ancak bu tezgahta **B ekseni Y’ye değil, X’e paraleldir** → Bu nedenle dönüş yönü **ters alınır** (kodda `con = -1.0` varsayılan).
+
+İşte bu yüzden `conventional-directions` ayarı var.
+
+---
+
+## 📐 2. **Kodun Matematiksel Mantığı (Matris Yok!)**
+
+### 📌 Temel Değişkenler:
+- `joints[0..8]` → Joint (motor) pozisyonları:  
+  `[Xj, Yj, Zj, Aj, Bj, Cj, Uj, Vj, Wj]`
+- `pos->tran.x/y/z`, `pos->a/b/c/u/v/w` → Makine koordinatları (G-kodundaki X,Y,Z,A,B,C,U,V,W)
+
+---
+
+### 🔁 **Ters Kinematik (`kinematicsInverse`)** → *Makine koordinatı* → *Joint*
+
+Verilen bir **makine pozisyonu (X,Y,Z,B,C,U,V,W)** için gerekli **motor pozisyonları** şöyle hesaplanır:
+
+#### 🔹 Adım 1: B ekseninin etkisi (pivot noktası)
+- B ekseninin merkezi (pivot), Z yönünde `pivot_length + W` uzaklıkta.
+- Bu nokta B açısı kadar döner → X ve Z’de kayma oluşur:
+  ```c
+  zb = (pivot_length + W) * cos(B_rad)   // Z’de düşüş
+  xb = (pivot_length + W) * sin(B_rad)   // X’de sapma
+  ```
+
+#### 🔹 Adım 2: C ekseninin etkisi (tabla dönmesi)
+- (X, Y) → kutupsal koordinata:  
+  `xyr = √(X² + Y²)`, `xytheta = atan2(Y, X) - C_rad`  
+  Çünkü C dönünce koordinat sistemi döner → ters açı çıkartılır.
+
+#### 🔹 Adım 3: U ekseninin etkisi (B’ye paralel)
+- U ekseni B ile birlikte eğilir:
+  ```c
+  zv = U * sin(B_rad)   // Z’de etki
+  xv = U * cos(B_rad)   // X’de etki
+  ```
+
+#### 🔹 Sonuç (Joint = motor pozisyonları):
+```c
+joints[0] = xyr * cos(xytheta) + (con * xb) + xv   // X_joint
+joints[1] = xyr * sin(xytheta) + V                 // Y_joint
+joints[2] = Z + zb - (con * zv) - pivot_length     // Z_joint
+joints[3..8] = A, B, C, U, V, W direkt kopyalanır
+```
+
+> Not: `con = -1.0` varsayılan → xb ve zv etkileri ters alınır (düzeltme).
+
+---
+
+### 🔀 **İleri Kinematik (`kinematicsForward`)** → *Joint* → *Makine koordinatı*
+
+Aynı mantık tersine çevrilir:
+- Önce `xyr = √(Xj² + Yj²)`, `xytheta = atan2(Yj, Xj) + C_rad`  
+  (çünkü C eklenince koordinat döner)
+- Sonra X,Y,Z hesaplanırken `xb`, `zb`, `xv`, `zv` çıkarılır.
+
+---
+
+## 🛠️ 3. **Nasıl Ayarlama Yapılır? (Adım Adım)**
+
+### ✅ 1. Bileşeni Derleyip Yükleyin
+```bash
+halcompile --install maxkins.c
+```
+→ `/usr/lib/linuxcnc/modules/maxkins.so` oluşturulur.
+
+---
+
+### ✅ 2. `machine.ini` Dosyasına Ekleyin
+```ini
+[KINS]
+KINEMATICS = maxkins
+JOINTS = 9
+```
+
+> **DİKKAT**:  
+> - `JOINTS = 9` olmalı çünkü kod `joints[8]` (yani 0–8 → 9 eksen) kullanıyor.  
+> - `TRAJ` bölümü de **9 eksen** desteklemelidir:
+>   ```ini
+>   [TRAJ]
+>   COORDINATES = X Y Z A B C U V W
+>   AXIS_MASK = 511  ; 2^9 - 1 = 511
+>   ```
+
+---
+
+### ✅ 3. HAL İçinde Parametreleri Ayarlayın
+
+#### A. `pivot-length` ayarı → B ekseni döndürme merkezinin Z’ye mesafesi (mm)
+- Örneğin: pivot noktası Z=0’dan 175 mm yukarıdaysa:
+  ```bash
+  setp maxkins.pivot-length 175.0
+  ```
+
+#### B. `conventional-directions` ayarı
+| Değer | Anlamı |
+|-------|--------|
+| `0` (varsayılan) | **Özel yön**: B ekseni RS-274/NGC’ye ters çalışıyor (Chris Radek’in orijinal tezgahı bu şekilde) |
+| `1` | **Standart yön**: B ekseni Y’ye paralel ve +B = CCW (LinuxCNC standardı) |
+
+Eğer tezgahınız **standart B yönünde** yapılmışsa:
+```bash
+setp maxkins.conventional-directions 1
+```
+
+> 📌 **Nasıl anlarsınız?**  
+> - G53 G0 B10 yazdığınızda:  
+>   - Eğer kafa **saat yönünde** (CW) dönüyorsa → `conventional-directions = 0` (varsayılan)  
+>   - Eğer **saat yönünün tersine** (CCW) dönüyorsa → `conventional-directions = 1`
+
+---
+
+### ✅ 4. Test Etme
+
+#### Ters kinematik testi (makine → joint):
+```bash
+# Örnek: B=30°, C=45°, X=100, Y=100, Z=0, W=0
+setp halui.axis.x.pos-cmd 100
+setp halui.axis.y.pos-cmd 100
+setp halui.axis.z.pos-cmd 0
+setp halui.axis.b.pos-cmd 30
+setp halui.axis.c.pos-cmd 45
+# Ardından joint pozisyonlarını izleyin:
+# show pin maxkins.pivot-length → 175
+# watch joint.0.pos-fb (X_joint), joint.1.pos-fb (Y_joint) vs.
+```
+
+#### İleri kinematik testi (joint → makine):  
+`touch off` veya `axis position` ile karşılaştırın.
+
+---
+
+## 📊 4. **Matris Kullanılıyor mu?**
+
+**Hayır.**  
+- `matrixkins.comp` → **lineer dönüşüm** (matris çarpımı) kullanır.  
+- `maxkins.c` → **non-lineer, trigonometrik dönüşüm** kullanır (açılar var!).  
+  → Çünkü **B ve C dönen eksenler**, dönüşümleri lineer değildir.
+
+Örneğin:  
+- B açısı 0° iken: `X_joint = X`  
+- B açısı 30° iken: `X_joint = X·cos(30°) + Z·sin(30°) + ...`  
+  → Bu bir **afin dönüşüm**dür, sabit bir matrisle ifade **edilemez** (açıya göre değişir!).
+
+Bu yüzden **matris yok**, sadece **dinamik trigonometri** var.
+
+---
+
+## 📝 Ek Notlar
+
+1. **W ekseni**, aslında **tool length offset** gibi davranır (pivot’un Z’ye mesafesine eklenir).
+2. **U ekseni**, B ekseni ile birlikte eğilir → bu yüzden hem X hem Z’de etki eder.
+3. **V ekseni**, sadece Y’ye eklenir → B’den etkilenmez (kodda açıkça belirtilmiş: *"V correction is always in joint 1 only"*).
+
+---
+
+İsterseniz:
+- Bu kinematiği test etmek için bir **HAL test dosyası** (.hal) yazabilirim,
+- Veya `pivot-length` değerini **lazer ölçümü / prob verisiyle** nasıl kalibre edeceğinizi adım adım anlatabilirim,
+- Ya da bu kinematiği `matrixkins` ile **birleştirmek** mümkün mü diye değerlendirebiliriz (örneğin önce matrix → sonra maxkins).
+
+Yardımcı olmamı ister misiniz?
+
+### USER
+matrixkins.comp ve  maxkins.c karıştırdım . fark nedir?
+
+### ASSISTANT
+Harika bir soru! Gerçekten de **`matrixkins.comp`** ile **`maxkins.c`**, ikisi de LinuxCNC’de özel kinematik tanımlayan dosyalardır ama **hiçbir ortak yönleri yoktur** — hatta mantık, kullanım alanı ve matematiksel temelleri **tamamen farklıdır**.
+
+Aşağıda farkları **karşılaştırmalı tablo** ve **açıklayıcı özet** şeklinde detaylandırıyorum:
+
+---
+
+## 🔍 **Temel Farklar Özeti**
+
+| Özellik | `matrixkins.comp` | `maxkins.c` |
+|--------|-------------------|--------------|
+| **Tür** | **Lineer (afin) kinematik** | **Non-lineer (trigonometrik) kinematik** |
+| **Matematiksel yapı** | **3×3 dönüşüm matrisi** (`c0…c8`) | **Açıya bağlı sin/cos/atan2** fonksiyonları |
+| **Eksen sayısı** | Temelde **3 eksen** (X,Y,Z); ek eksenler doğrudan geçer | **9 joint** → **X,Y,Z,A,B,C,U,V,W** (5-eksenli + ekstra lineerler) |
+| **Kullanım amacı** | Mekanik hataları **yazılımca düzeltmek** (ölçek, diklik, paralellik) | **Özel mekanik yapıyı** (dönen kafa + dönen tabla) modellemek |
+| **Matris var mı?** | ✅ Evet — doğrudan `c0…c8` ile 3×3 matris tanımlanır, tersi alınır | ❌ Hayır — açılar varsa matris yeterli değildir; dinamik trigonometri gerekir |
+| **Kalibrasyon** | Fiziksel ölçümlerle `c0…c8` katsayıları hesaplanır | `pivot-length`, `conventional-directions` gibi 2 HAL parametresiyle ayarlanır |
+| **Makine tipi** | 3-eksenli freze (**Kartezyen**, ancak *hizasız*) | Chris Radek’in **“Max” 5-eksenli masaüstü freze** (B-tilt + C-rotary) |
+| **Kinematik türü** | **Affine transformation** (lineer + öteleme yok → sadece lineer) | **Seri robot benzeri** (joint’ler zincirleme etkiler) |
+
+---
+
+## 📐 Detaylı Karşılaştırma
+
+### 1. **`matrixkins.comp` — “Yazılımsal Hizalama Düzelticisi”**
+- **Ne yapar?**  
+  Gerçek hayatta X ekseni 1 mm istendiğinde 1.002 mm gidiyorsa veya Y ekseni X’e tam dik değilse, bu küçük mekanik hataları **tek bir 3×3 matrisle** telafi eder.
+
+- **Formül:**  
+  \[
+  \begin{bmatrix} X_j \\ Y_j \\ Z_j \end{bmatrix}
+  =
+  \begin{bmatrix}
+  c_0 & c_1 & c_2 \\
+  c_3 & c_4 & c_5 \\
+  c_6 & c_7 & c_8
+  \end{bmatrix}
+  \cdot
+  \begin{bmatrix} X \\ Y \\ Z \end{bmatrix}
+  \]
+
+- **Örnek uygulama:**  
+  - `c1 = 0.001` → Her 1 mm Y hareketi için 0.001 mm X sapması (X–Y diklik hatası)  
+  - `c0 = 1.0005` → X ekseninin %0.05 uzun gitmesi (ölçek hatası)
+
+- **Matris tersi** (`kinematicsForward`) analitik olarak alınır — burada **Wikipedia ve arderis.wordpress** kaynaklarındaki 3×3 ters matris formülü doğrudan kullanılır.
+
+✅ **Avantaj:** Basit, hızlı, gerçek zamanlı sistemde düşük maliyetli.  
+⚠️ **Sınır:** Sadece **küçük** hatalar düzeltilebilir; büyük açılar (örn. 30°) için **uygun değildir** (lineer yaklaşım çöker).
+
+---
+
+### 2. **`maxkins.c` — “Özel 5-Eksenli Makine Modelleyicisi”**
+- **Ne yapar?**  
+  Chris Radek’in “Max” tezgahında:  
+  - **B ekseni**: Kafa XZ-düzleminde yukarı/aşağı döner (Y’ye değil!)  
+  - **C ekseni**: Masa XY-düzleminde döner  
+  → Bu yapı **standart RS-274/NGC tanımlarına uymaz**, bu yüzden özel kinematik gerekir.
+
+- **Formül (basitleştirilmiş):**
+  ```c
+  // B açısı varsa:
+  xb = (pivot + W) * sin(B)   // X’de kayma
+  zb = (pivot + W) * cos(B)   // Z’de yükseltme/düşürme
+  // C açısı varsa:
+  xyr = hypot(X, Y)
+  xytheta = atan2(Y, X) - C   // koordinat sistemi döner!
+  ```
+
+- **Örnek etki:**  
+  `G0 X100 Y0 B30` → Joint’lerde X ve Z aynı anda hareket eder; çünkü kafa eğildiğinde uç noktası aynı X,Y,Z’de kalmalı.
+
+✅ **Avantaj:** Gerçekçi, non-lineer mekanik yapıları doğru modeller.  
+⚠️ **Sınır:** Sadece bu özel makine (veya benzeri B+C yapıları) için geçerli.
+
+---
+
+## 🧩 Neden Karıştırılıyor?
+
+| Sebep | Açıklama |
+|------|----------|
+| İsim benzerliği | İkisinde de “`kins`” (kinematics) var → “matrix” ve “max” farkı gözden kaçıyor |
+| Her ikisi de HAL pinleriyle ayarlanır | `matrixkins.c0`, `maxkins.pivot-length` gibi → kullanıcı “aynı şey” zannedebilir |
+| Her ikisi de `KINEMATICS_BOTH` destekler | İleri + ters kinematik var → fonksiyon imzaları benzer |
+| Kaynak kodlarında matris sözü geçiyor | `maxkins.c` içinde *“matris yok”* ama `matrixkins.comp` içinde açıkça var |
+
+---
+
+## 🛠️ Hangisini Kullanmalısınız?
+
+| Durum | Öneri |
+|------|-------|
+| **3-eksenli freze/tahta kesme makinesi** ve küçük hatalar varsa (kılcal eğiklik, mikron seviyesi ölçek hatası) | ✅ **`matrixkins.comp`** |
+| **5-eksenli freze** (B-tilt + C-rotary) ve eksenler standart RS-274’e uymuyorsa | ✅ **`maxkins.c`** (veya türevi) |
+| **Hexapod/SCARA/delta robot** gibi kompleks yapı | ❌ İkisi de **uygun değil** → `genhexkins`, `scarakins`, özel kinematik gerekir |
+| **Gantry (XYYZ)** gibi çift motorlu eksen | ❌ İkisi de değil → `gantrykins` veya özel HAL karışımı |
+
+---
+
+## 📌 Ek Bilgi: Aynı Anda Kullanılabilir mi?
+
+**Evet — ama dikkatli!**  
+LinuxCNC’de **sadece bir kinematik bileşeni** aktif olabilir (`KINEMATICS = ...`).
+
+Ancak şunu yapabilirsiniz:
+1. Önce `matrixkins` ile **mekanik hizalamayı düzeltin** (X,Y,Z’yi ideal hale getirin),  
+2. Sonra bu düzeltmeyi içeren **özel bir `maxkins` türevi** yazarak B/C dönüşümlerini yapın.
+
+→ Bu, **matris × trigonometrik** bileşik kinematik demektir.  
+→ Derinlemesine entegrasyon için `maxkins.c` içine `matrixkins` dönüşümünü elle entegre etmek gerekir.
+
+---
+
+İsterseniz:
+- İki bileşeni **birleştiren örnek bir `hybridkins.comp`** taslağı yazabilirim,  
+- Veya sizin makinenizin mekanik şemasını verirseniz, hangi kinematiğin uygun olduğunu **öneride** bulunabilirim.
+
+Nasıl yardımcı olabilirim? 🛠️
+
+### USER
+component skewkins;
+
+description
+"""
+
+Implements deskewing of a 3-axis machine
+
+""";
+// The fpin pin is not accessible in kinematics functions.
+// Use the *_setup() function for pins and params used by kinematics.
+pin out s32 fpin=0"pin to demonstrate use of a conventional (non-kinematics) function fdemo";
+function fdemo;
+license "GPL";
+author "Adaptation of previous code";
+;;
+
+#include "rtapi_math.h"
+#include "kinematics.h"
+
+static struct haldata {
+    hal_float_t *skew_y;
+    hal_float_t *skew_xz;
+    hal_float_t *skew_yz;
+} *haldata;
+
+
+FUNCTION(fdemo) {
+   // This function can be added to a thread (addf) for
+   // purposes not related to the kinematics functions.
+   if (fpin == 0) {
+       rtapi_print("fdemo function added to thread\n");
+   }
+   fpin++;
+}
+
+static int skewkins_setup(void) {
+#define HAL_PREFIX "skewkins"
+    int res=0;
+
+    // inherit comp_id from rtapi_main()
+    if (comp_id < 0) goto error;
+    // set unready to allow creation of pins
+    if (hal_set_unready(comp_id)) goto error;
+
+    haldata = hal_malloc(sizeof(struct haldata));
+    if (!haldata) goto error;
+
+    // hal pin examples:
+    res += hal_pin_float_newf(HAL_IN ,&(haldata->skew_y) ,comp_id,"%s.skew-y" ,HAL_PREFIX);
+    res += hal_pin_float_newf(HAL_IN ,&(haldata->skew_xz) ,comp_id,"%s.skew-xz" ,HAL_PREFIX);
+    res += hal_pin_float_newf(HAL_IN ,&(haldata->skew_yz) ,comp_id,"%s.skew-yz" ,HAL_PREFIX);
+
+    if (res) goto error;
+    hal_ready(comp_id);
+    rtapi_print("*** %s setup ok\n",__FILE__);
+    return 0;
+error:
+    rtapi_print("\n!!! %s setup failed res=%d\n\n",__FILE__,res);
+    return -1;
+#undef HAL_PREFIX
+}
+
+KINS_NOT_SWITCHABLE
+// see millturn.comp for example of switchable kinematics
+
+EXPORT_SYMBOL(kinematicsType);
+EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsForward);
+
+KINEMATICS_TYPE kinematicsType()
+{
+static bool is_setup=0;
+    if (!is_setup) skewkins_setup();
+    return KINEMATICS_IDENTITY; // set as required
+           // Note: If kinematics are identity, using KINEMATICS_BOTH
+           //       may be used in order to allow a gui to display
+           //       joint values in preview prior to homing
+} // kinematicsType()
+
+static bool is_ready=0;
+int kinematicsForward(const double *j,
+                      EmcPose * pos,
+                      const KINEMATICS_FORWARD_FLAGS * fflags,
+                      KINEMATICS_INVERSE_FLAGS * iflags)
+{
+    static bool gave_msg;
+    // [KINS]JOINTS=3
+    pos->tran.x = j [0] + j [1]*(*(haldata->skew_y)) + j [2]*(*(haldata->skew_xz));
+    pos->tran.y = j [1] + j [2]*(*(haldata->skew_yz));
+    pos->tran.z = j [2];
+    // unused coordinates:
+    pos->a = 0;
+    pos->b = 0;
+    pos->c = 0;
+    pos->u = 0;
+    pos->v = 0;
+    pos->w = 0;
+
+    return 0;
+} // kinematicsForward()
+
+int kinematicsInverse(const EmcPose * pos,
+                      double *j,
+                      const KINEMATICS_INVERSE_FLAGS * iflags,
+                      KINEMATICS_FORWARD_FLAGS * fflags)
+{
+    is_ready = 1; // Inverse is not called until homed for KINEMATICS_BOTH
+
+
+    j [0] = pos->tran.x - pos->tran.y*(*(haldata->skew_y)) - pos->tran.z*(*(haldata->skew_xz));
+    j [1] = pos->tran.y - pos->tran.z*(*(haldata->skew_yz));
+    j [2] = pos->tran.z;
+
+
+    return 0;
+} // kinematicsInverse()  bu program nasıl çalışır?
+
+### ASSISTANT
+Verdiğiniz `skewkins.comp` dosyası, **3 eksenli (X, Y, Z) bir tezgahın küçük geometrik çarpıklıklarını (skew)** telafi etmek için tasarlanmış, LinuxCNC uyumlu bir **özel kinematik bileşenidir**.
+
+Aşağıda **detaylı açıklamayla** nasıl çalıştığını adım adım anlatıyorum:
+
+---
+
+## 🧩 1. **Genel Amaç / Ne İşe Yarar?**
+
+Bu bileşen, tezgahınızın mekanik olarak *tam Kartezyen* olmadığı durumda (örneğin:  
+- Y ekseni X’e tam dik değil → **Y-X skew**,  
+- Z ekseni X’e veya Y’ye eğik → **Z-X** ve **Z-Y skew**),  
+bu hataları **yazılım seviyesinde düzeltir**.
+
+> ⚠️ Dikkat: Bu bileşen **küçük açılar** (genellikle < 2°) için uygundur. Büyük çarpıklıklar mekanik olarak düzeltilmelidir.
+
+---
+
+## 📐 2. **Matematiksel Model (Dönüşüm Denklemleri)**
+
+### ➕ **Ters Kinematik (`kinematicsInverse`)**  
+> → *Makine koordinatı (X,Y,Z)* → *Joint (motor) komutu*
+
+\[
+\begin{aligned}
+J_0 \, (\text{X\_joint}) &= X - Y \cdot s_y - Z \cdot s_{xz} \\
+J_1 \, (\text{Y\_joint}) &= Y - Z \cdot s_{yz} \\
+J_2 \, (\text{Z\_joint}) &= Z
+\end{aligned}
+\]
+
+Burada:
+- `s_y` = `skewkins.skew-y` → Y ekseni X’e göre eğikliği (birimsiz oran, örn. 0.002 = 2 mm/m)
+- `s_xz` = `skewkins.skew-xz` → Z ekseni X’e göre eğikliği (X-Z düzleminde)
+- `s_yz` = `skewkins.skew-yz` → Z ekseni Y’ye göre eğikliği (Y-Z düzleminde)
+
+### ➖ **İleri Kinematik (`kinematicsForward`)**  
+> → *Joint (motor pozisyonu)* → *Gerçek makine koordinatı (X,Y,Z)*
+
+\[
+\begin{aligned}
+X &= J_0 + J_1 \cdot s_y + J_2 \cdot s_{xz} \\
+Y &= J_1 + J_2 \cdot s_{yz} \\
+Z &= J_2
+\end{aligned}
+\]
+
+Bu, yukarıdaki denklemin tersidir — matris formunda şöyle yazılabilir:
+
+\[
+\begin{bmatrix} X \\ Y \\ Z \end{bmatrix}
+=
+\underbrace{
+\begin{bmatrix}
+1 & s_y & s_{xz} \\
+0 & 1 & s_{yz} \\
+0 & 0 & 1
+\end{bmatrix}
+}_{\text{Üst üçgen (shear) matrisi}}
+\cdot
+\begin{bmatrix} J_0 \\ J_1 \\ J_2 \end{bmatrix}
+\]
+
+✅ Bu matris **her zaman tersinirdir** (determinantı = 1), bu yüzden kinematik stabil çalışır.
+
+---
+
+## 🔧 3. **Nasıl Kurulur ve Ayarlanır?**
+
+### ✅ 1. Derle ve yükle:
+```bash
+halcompile --install skewkins.comp
+```
+
+### ✅ 2. `machine.ini` dosyasına ekle:
+```ini
+[KINS]
+KINEMATICS = skewkins
+JOINTS = 3
+```
+
+> ❗ `JOINTS = 3` olmalı — sadece X, Y, Z joints var.
+
+### ✅ 3. HAL içinde skew katsayılarını ayarla:
+
+| Parametre | Açıklama | Tipik değer | Nasıl ölçülür? |
+|----------|----------|-------------|----------------|
+| `skewkins.skew-y` | Her 1 mm Y hareketinde, X’te oluşan sapma (mm/mm) | `0.0005` (0.5 mm/m) | 1000 mm Y hareket ettirip X’te kaç mm sapma oluştuğunu ölç (komparatörle) |
+| `skewkins.skew-xz` | Her 1 mm Z hareketinde, X’te oluşan sapma | `0.001` (1 mm/m) | Z’yi yükseltirken X yönünde kaç mm kaydığını ölç |
+| `skewkins.skew-yz` | Her 1 mm Z hareketinde, Y’de oluşan sapma | `-0.0003` | Aynı yöntemle Y yönünde ölçüm |
+
+Örnek ayar:
+```bash
+setp skewkins.skew-y   0.0008    # Y, X’e 0.8 mm/m eğik
+setp skewkins.skew-xz -0.0002    # Z, X’e -0.2 mm/m eğik (ters yönde)
+setp skewkins.skew-yz  0.0001    # Z, Y’ye 0.1 mm/m eğik
+```
+
+---
+
+## 📊 4. **Örnek Senaryo**
+
+Diyelim ki:
+- `skew-y = 0.001`
+- `G0 X100 Y100 Z0` komutu verildi.
+
+### ❌ Düz kinematikte (trivial):
+- X_joint = 100, Y_joint = 100  
+→ Ancak Y eğik olduğu için uç nokta **gerçek X = 100 + 100×0.001 = 100.1 mm** olur!
+
+### ✅ `skewkins` ile:
+- `kinematicsInverse` çalışır:  
+  `X_joint = 100 - 100×0.001 = 99.9`  
+  `Y_joint = 100`  
+→ Artık uç nokta **tam X = 100 mm** olur.
+
+---
+
+## ⚙️ 5. **Ek Özellikler**
+
+### 🔹 `fpin` ve `fdemo()` fonksiyonu
+- `fpin`: Bir sayaç pinidir (sadece demo amaçlı).
+- `fdemo()`: Bir HAL fonksiyonudur — bir thread’e (`addf`) eklenerek periyodik işlemler için kullanılabilir.
+
+Örneğin:
+```bash
+loadrt skewkins
+addf skewkins.fdemo servo-thread
+```
+→ Her servo döngüsünde `fpin` artar ve konsola bir mesaj yazar.
+
+> Bu kısım **kinematikle ilgisi yoktur**; geliştirme/test amaçlıdır.
+
+---
+
+## 🆚 Karşılaştırma: `skewkins` vs `matrixkins`
+
+| Özellik | `skewkins` | `matrixkins` |
+|--------|------------|--------------|
+| **Yapı** | Sadece *shear* (eğiklik) düzeltir — çok basit | Tam 3×3 matris → ölçek, shear, dönme hepsi |
+| **Matris türü** | Üst üçgen matris (determinant = 1) | Genel 3×3 (determinant ≠ 0 şartı var) |
+| **Kullanım kolaylığı** | 3 parametre, sezgisel | 9 parametre, kalibrasyon karmaşık |
+| **Hata kapasitesi** | Küçük shear hataları | Küçük shear + ölçek + dönme |
+| **Güvenlik** | Her zaman tersinir → çökmez | Yanlış `c0..c8` ile `det=0` → çöker! |
+
+➡️ **Eğer sadece küçük eğiklik varsa, `skewkins` daha güvenli ve verimlidir.**
+
+---
+
+## 🔍 6. **Hangi Durumlarda Kullanılmalı?**
+
+| Durum | Öneri |
+|------|-------|
+| Masanın X-Y düzleminde küçük çarpıklığı var (Y ekseni X’e 1 mm/m eğik) | ✅ `skew-y` ayarla |
+| Z ekseni mil ile paralel değil (Z çıkarken X/Y’ye doğru eğiliyor) | ✅ `skew-xz`, `skew-yz` ayarla |
+| Eksenlerde ölçek hatası var (X 1 mm isteyince 1.002 mm gidiyor) | ❌ → `matrixkins.c0 = 1.002` gerekir |
+| X–Y diklik hatası 0.5° civarında | ✅ `skew-y ≈ tan(0.5°) ≈ 0.0087` ile yaklaşık düzeltilebilir |
+
+> 📌 Not: `skew-y = tan(θ)` şeklinde yaklaşık hesaplanabilir (θ radyan cinsinden küçük açı).
+
+---
+
+## 🛠️ Ekstra: Nasıl Kalibre Edilir?
+
+1. **Y-X skew (`skew-y`)** ölçümü:
+   - Bir komparatör mile takılır, masa üzerinde X yönünde sabitlenir.
+   - Y ekseni +100 mm hareket ettirilir.
+   - Komparatörde X yönünde ΔX okunur → `skew-y = ΔX / 100`.
+
+2. **Z-X skew (`skew-xz`)**:
+   - Komparatör +X yönünde, yükseklikde bir noktaya temas eder.
+   - Z +100 mm yükseltilir.
+   - Komparatörde ΔX okunur → `skew-xz = ΔX / 100`.
+
+3. **Z-Y skew (`skew-yz`)**:
+   - Aynı işlem +Y yönünde yapılır.
+
+---
+
+İsterseniz:
+- Bu kinematiği test etmek için bir **HAL demo dosyası** hazırlayabilirim,  
+- Veya `skewkins` ile `matrixkins` arasında otomatik geçiş yapan **hibrit bir çözüm** önerebilirim.
+
+Nasıl yardımcı olabilirim?

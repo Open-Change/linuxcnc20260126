@@ -1,0 +1,139 @@
+
+
+O<cakiyi-degistir> SUB
+; makina G59.3 mekanik olarak sifir noktası gir
+
+G21	;milimetre
+G90	;mutlak ekseninde
+G64	;belirtilen nokta kesin git
+G40	;sagdan soldan kesme yok cizgi uzerinde git   
+g49	;cakı uzunlugu iptal  sifir yapıldı
+M9      ; sogutucuyu kapat
+M5      ; spindle motoru kapat
+; m70 ve m72 oku
+#1900=#<_coord_system>	(suan daki kooordinat sistemi G54  arasında G59)
+
+o500 if [#<_current_tool> EQ #<_selected_tool>]
+;(debug,  Spindel aynı uc var)
+o500 else 
+
+G54
+ 	
+        (güvenli yer)
+  ;#<_ToolZRef> = #5063                         ( save trip point )
+  ;#<_ToolZLast> = #<_ToolZRef>                 ( save last tool Z position )
+
+  G53 G0  Z-5	            ( makina ekseninde Z-10 git yukarı cık)
+  g53 G0  X30 Y70  		    ( makina ekseninde  probe noktasına gec)
+  (msg,cakıyı degiştir )
+  ;m0;bekle
+                         ; el ile degişme var oldugudan sadece bir adet T1 var
+                         ; m6 cakı degistir
+
+  M6 T#<_selected_tool>  
+ ; g53 g01 x30 y70 z-5 f150
+
+  G43.1 Z0                  (TLO RESET)
+   
+  g53 g01   x31 y71 F50; probun oldugu yer
+    (msg,dikkkkaaat 75mm inecek)
+  G91 f100                        ( ekseninde f150 eklemeli        )					
+  G38.2 Z-75 F150            ( probe degince kadar F100 yaklas)	
+  g91
+  G1 Z1.9                    ( geri kac eklemeli             )               								
+  G38.2 Z-2 F10 	         ( probe degince kadar F10 yaklas)  
+  #<_ProbeUzunlugu> =[ #5063 + #5223 ]   (save reference tool length) (prob degeri z eksen)
+                                         (#5223 g54 de ki Z degeri) 
+
+
+
+
+
+
+
+  g90                 
+
+
+
+ 
+;T1 referans cakı yap
+;g43.1 z[#<_ProbeUzunlugu> - #1000 ] (set new tool offset)
+
+(debug,yeni length is : #<_ProbeUzunlugu>)
+
+G10 L1 P#<_selected_tool> Z#<_ProbeUzunlugu>  	
+
+
+;#1000= #<_ProbeUzunlugu> ; 
+
+	
+ 
+
+ 
+  G53 G0  Z-10	        ( makina ekseninde Z-10 git yukarı cık)
+
+  g53 G0  X30 Y70  		( makina ekseninde  probe noktasına gec)
+    (msg,cakının boyu değişti)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(gelen koordinat sistemi ile cıkıs yap G54 arasında G59)	
+o100 if[#1900 EQ 540]
+G54
+o100 endif
+o101 if[#1900 EQ 550]
+G55
+o101 endif
+
+o102 if[#1900 EQ 560]
+G56
+o102 endif
+
+o103 if[#1900 EQ 570]
+G57
+o103 endif
+
+o104 if[#1900 EQ 580]
+G58
+o104 endif
+
+o105 if[#1900 EQ 590]
+G59
+o105 endif
+
+o106 if[#1900 EQ 591]
+G59.1
+o106 endif
+
+o107 if[#1900 EQ 592]
+G59.2
+o107 endif
+
+o108 if[#1900 EQ 593]
+G59.3
+o108 endif
+ 
+
+ 
+o500 endif (spindle tool ucu programı bitti)
+
+
+
+O<cakiyi-degistir>  ENDSUB
+M2
+

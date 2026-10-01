@@ -1,0 +1,29 @@
+component acilstop "X/Y ferror > 1.5mm -> EstopOutDurumu=0 (Güvensiz/E-Stop Active)";
+license "GPL";
+
+pin in float x_ferror = 0.0 "X ekseni takip hatası";
+pin in float y_ferror = 0.0 "Y ekseni takip hatası";
+pin out float xy_ferror = 0.0 "Vektörel (bileşke) takip hatası";
+pin out bit EstopOutDurumu = 1 "Güvenlik durumu: 1 = Normal/Güvenli, 0 = Acil Stop";
+
+function _;
+
+;;
+
+#include <math.h>
+
+FUNCTION(_) {
+    double x = fabs(x_ferror);
+    double y = fabs(y_ferror);
+    
+    // 1. Maksimum tekil eksen hatası (Chebyshev)
+    double m = (x > y) ? x : y;
+    
+    // 2. Doğru Bileşke Hata Hesabı (Eoklit Vektörel Hipotenüs: sqrt(x^2 + y^2))
+    xy_ferror = sqrt((x * x) + (y * y));
+    
+    // 3. E-Stop Çıkış Mantığı:
+    // Hata <= 1.5mm ise EstopOutDurumu = 1 (Güvenli/Devam)
+    // Hata > 1.5mm olursa EstopOutDurumu = 0 (Güvensiz/E-Stop Devrede)
+    EstopOutDurumu = (m <= 1.5);
+}

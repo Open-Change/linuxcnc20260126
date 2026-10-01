@@ -1,0 +1,580 @@
+<!--  Test panel for the parallel port cfg for out  -->
+<pyvcp>
+<hbox>
+    <label>
+        <text>"Çalışma Süresi"</text>
+        <font>("Helvetica",14)</font>
+    </label>
+    <u32>
+        <halpin>"time-hours"</halpin>
+        <font>("Helvetica",14)</font>
+        <format>"2d"</format>
+    </u32>
+    <label>
+        <text>":"</text>
+        <font>("Helvetica",14)</font>
+    </label>
+    <u32>
+        <halpin>"time-minutes"</halpin>
+        <font>("Helvetica",14)</font>
+        <format>"2d"</format>
+    </u32>
+    <label>
+        <text>":"</text>
+        <font>("Helvetica",14)</font>
+    </label>
+    <u32>
+        <halpin>"time-seconds"</halpin>
+        <font>("Helvetica",14)</font>
+        <format>"2d"</format>
+    </u32>
+</hbox>
+<tabs>
+    <names> ["spindle","green eggs"]</names>
+</tabs>
+<tabs>
+    <names>["Spindle", "Giriş Pinleri", "Ham", "abc"]</names>
+    <vbox>
+
+
+
+    <label>
+             <text>"udp paket error:"</text>
+    </label>
+        
+    <bar>
+        <halpin>"gelen_udp_sayisi"</halpin>
+        <max_>30</max_>
+    </bar>	
+	
+	
+	 <label>
+           <text>"Y ekseni acı sensor:"</text>
+    </label>
+      
+    <bar>
+		
+        <halpin>"yeksen-aci"</halpin>
+        <max_>360</max_>
+    </bar>	
+        <bar>
+    <halpin>"y-ferror"</halpin>
+    <min_>-0.6</min_>
+    <max_> 0.6</max_>
+    <bgcolor>"grey"</bgcolor>
+    <fillcolor>"red"</fillcolor>
+</bar>  
+    
+    
+    
+    
+    
+     <label>
+	<text>"Y motor pos degeri:"</text>
+	</label>
+	
+	<number>
+    <halpin>"yposition-fb"</halpin>
+    <font>("Helvetica",24)</font>
+    <format>"+4.4f"</format>
+</number>		
+
+
+	
+
+
+
+
+<!-- ile başlar ve 
+<meter>
+      <halpin>"yposition-fb"</halpin>
+      <text>"Y Eksen"</text>
+      <subtext>"mm"</subtext>
+      <size>200</size>
+      <min_>-2</min_>
+      <max_>2</max_>
+      <majorscale>1</majorscale>
+      <minorscale>0.5</minorscale>
+      <region1>0,10,"yellow"</region1>
+    </meter>
+
+ile biter -->
+
+
+
+	
+	 <label>
+           <text>"X ekseni acı sensor:"</text>
+    </label>
+        
+    <bar>
+        <halpin>"xeksen-aci"</halpin>
+        <max_>360</max_>
+    </bar>	
+    
+            <bar>
+    <halpin>"x-ferror"</halpin>
+    <min_>-0.6</min_>
+    <max_> 0.6</max_>
+    <bgcolor>"grey"</bgcolor>
+    <fillcolor>"red"</fillcolor>
+    
+
+
+
+
+
+
+
+
+</bar>  
+	
+	
+	     <label>
+	<text>"X motor pos degeri:"</text>
+	</label>
+	
+			
+	<number>
+    <halpin>"xposition-fb"</halpin>
+    <font>("Helvetica",24)</font>
+    <format>"+4.4f"</format>
+   </number>	
+
+
+
+
+
+
+	
+	     <label>
+	<text>"A motor pos degeri:"</text>
+	</label>
+	
+			
+	<number>
+    <halpin>"Aposition-fb"</halpin>
+    <font>("Helvetica",24)</font>
+    <format>"+4.4f"</format>
+   </number>	
+   
+            <bar>
+    <halpin>"A-ferror"</halpin>
+    <min_>-0.6</min_>
+    <max_> 0.6</max_>
+    <bgcolor>"grey"</bgcolor>
+    <fillcolor>"red"</fillcolor>
+          </bar>  
+
+<label>
+<text>"Pin13Probe EncoderZ"</text>
+<font>("Helvetica",14)</font>
+</label>
+<led>
+<halpin>"probe-giris-ledi"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+<led>
+<halpin>"ZPulseSinyali"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+
+
+<led>
+<halpin>"any-ferror-ledi"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+
+
+
+<!--
+<meter>
+      <halpin>"xposition-fb"</halpin>
+      <text>"X Eksen"</text>
+      <subtext>"mm"</subtext>
+      <size>200</size>
+      <min_>-3</min_>
+      <max_>3</max_>
+      <majorscale>1.50</majorscale>
+      <minorscale>.50</minorscale>
+      <region1>0,10,"yellow"</region1>
+    </meter>
+
+--> 
+
+
+
+
+
+
+    </vbox>
+    <vbox>
+        <label>
+            <text>"(Giriş Pinleri)"</text>
+        </label>
+ <hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<label>
+<text>"Pin 10"</text>
+<font>("Helvetica",14)</font>
+</label>
+<led>
+<halpin>"led-10"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+<hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<label>
+<text>"Pin 11"</text>
+<font>("Helvetica",14)</font>
+</label>
+<led>
+<halpin>"led-11"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+<hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<label>
+<text>"Pin 12"</text>
+<font>("Helvetica",14)</font>
+</label>
+<led>
+<halpin>"led-12"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+<hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<label>
+<text>"Pin13Probe "</text>
+<font>("Helvetica",14)</font>
+</label>
+<led>
+<halpin>"led-13"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+<hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<label>
+<text>"Pin 15"</text>
+<font>("Helvetica",14)</font>
+</label>
+<led>
+<halpin>"led-15"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>       
+        
+        
+        
+        
+        
+        
+    </vbox>
+    <vbox>
+        <label>
+            <text>"(this tab has nothing on it)"</text>
+        </label>
+        
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+    <hbox>	
+<relief>RIDGE</relief>
+<bd>2</bd>
+<button>
+<halpin>"btn01"</halpin>
+<text>"Pin 01"</text>
+</button>
+<led>
+<halpin>"allhomeoldu-pyvcp"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+<button>
+<halpin>"btn02"</halpin>
+<text>"Pin 02"</text>
+</button>
+<led>
+<halpin>"led-02"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+<hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<button>
+<halpin>"btn03"</halpin>
+<text>"Pin 03"</text>
+</button>
+<led>
+<halpin>"led-03"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+<button>
+<halpin>"btn04"</halpin>
+<text>"Pin 04"</text>
+</button>
+<led>
+<halpin>"led-04"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+<hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<button>
+<halpin>"btn05"</halpin>
+<text>"Pin 05"</text>
+</button>
+<led>
+<halpin>"led-05"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+<button>
+<halpin>"btn06"</halpin>
+<text>"Pin 06"</text>
+</button>
+<led>
+<halpin>"led-06"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+<hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<button>
+<halpin>"btn07"</halpin>
+<text>"Pin 07"</text>
+</button>
+<led>
+<halpin>"led-07"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+<button>
+<halpin>"btn08"</halpin>
+<text>"Pin 08"</text>
+</button>
+<led>
+<halpin>"led-08"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+<hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<button>
+<halpin>"btn09"</halpin>
+<text>"Pin 09"</text>
+</button>
+<led>
+<halpin>"led-09"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+<button>
+<halpin>"btn14"</halpin>
+<text>"Pin 14"</text>
+</button>
+<led>
+<halpin>"led-14"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+<hbox>
+<relief>RIDGE</relief>
+<bd>2</bd>
+<button>
+<halpin>"btn16"</halpin>
+<text>"Pin 16"</text>
+</button>
+<led>
+<halpin>"led-16"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+<button>
+<halpin>"btn17"</halpin>
+<text>"Pin 17"</text>
+</button>
+<led>
+<halpin>"led-17"</halpin>
+<size>25</size>
+<on_color>"green"</on_color>
+<off_color>"red"</off_color>
+</led>
+</hbox>
+
+    
+        
+        
+        
+    </vbox>
+		<vbox>
+
+				<hbox>
+				<relief>RAISED</relief>
+				<bd>3</bd>
+				<button>
+				<font>("Helvetica",20)</font>
+				<width>3</width>
+				<halpin>"x-plus"</halpin>
+				<text>"X+"</text>
+				</button>
+				<button>
+				<font>("Helvetica",20)</font>
+				<width>3</width>
+				<halpin>"x-minus"</halpin>
+				<text>"X-"</text>
+				</button>
+				</hbox>
+		
+
+				<hbox>
+				<relief>RAISED</relief>
+				<bd>3</bd>
+				<button>
+				<font>("Helvetica",20)</font>
+				<width>3</width>
+				<halpin>"y-plus"</halpin>
+				<text>"Y+"</text>
+				</button>
+				<button>
+				<font>("Helvetica",20)</font>
+				<width>3</width>
+				<halpin>"y-minus"</halpin>
+				<text>"Y-"</text>
+				</button>
+				</hbox>
+
+				<hbox>
+				<relief>RAISED</relief>
+				<bd>3</bd>
+				<button>
+				<font>("Helvetica",20)</font>
+				<width>3</width>
+				<halpin>"z-plus"</halpin>
+				<text>"Z+"</text>
+				</button>
+				<button>
+				<font>("Helvetica",20)</font>
+				<width>3</width>
+				<halpin>"z-minus"</halpin>
+				<text>"Z-"</text>
+				</button>
+				</hbox>
+				
+				
+				<hbox>
+				<relief>RAISED</relief>
+				<bd>4</bd>
+				<button>
+				<font>("Helvetica",20)</font>
+				<width>3</width>
+				<halpin>"a-plus"</halpin>
+				<text>"A+"</text>
+				</button>
+				<button>
+				<font>("Helvetica",20)</font>
+				<width>4</width>
+				<halpin>"a-minus"</halpin>
+				<text>"A-"</text>
+				</button>
+				</hbox>
+				
+
+				<vbox>
+				<relief>RAISED</relief>
+				<bd>3</bd>
+				<label>
+				<text>"Jog Speed"</text>
+				<font>("Helvetica",16)</font>
+				</label>
+				<scale>
+				<font>("Helvetica",14)</font>
+				<halpin>"jog-speed"</halpin>
+				<resolution>1</resolution>
+				<orient>HORIZONTAL</orient>
+				<min_>0</min_>
+				<max_>80</max_>
+				</scale>
+				</vbox>
+
+
+
+	     </vbox>
+	     
+</tabs>
+	
+<!--	
+<hbox>
+<labelframe text="Outputs">
+<font>("Helvetica",16)</font>	
+</labelframe>
+
+<labelframe text="Inputs">	
+<font>("Helvetica",16)</font>
+</labelframe>
+</hbox>
+-->
+
+</pyvcp>
+
+
+
+
+ 

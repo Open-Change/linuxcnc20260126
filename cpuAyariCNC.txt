@@ -1,0 +1,103 @@
+https://forum.linuxcnc.org/9-installing-linuxcnc/51244-update-error?start=0
+
+
+
+
+
+https://forum.linuxcnc.org/9-installing-linuxcnc/56053-fresh-install-issue-with-2-9-4
+sudo apt update 
+sudo dpkg -P raspi-firmware
+sudo apt dist-upgrade
+
+
+
+quiet isolcpus=1
+isolcpus=1    yap
+****  quiet splash isolcpus=1
+
+***** quiet splash isolcpus=1 processor.max_cstate=1 idle=poll clocksource=tsc
+test parçada test et
+quiet splash isolcpus=1 nohz_full=1 rcu_nocbs=1 mitigations=off processor.max_cstate=1 idle=poll clocksource=tsc
+
+sistem usb cihaz takma verim daha iyi
+
+
+deneme yap
+quiet splash isolcpus=1 processor.max_cstate=1 amd_iommu=off
+
+
+scandsk komut
+isolcpus=1 fsck.mode=force fsck.repair=yes
+
+***** quiet splash fsck.mode=force fsck.repair=yes
+      quiet splash fsck.mode=force fsck.repair=yes video=1280x1024@60 video olmadı
+
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash isolcpus=1 nohz_full=1 rcu_nocbs=1 mitigations=off idle=poll"
+quiet splash isolcpus=1 nohz_full=1 rcu_nocbs=1 mitigations=off processor.max_cstate=1 idle=poll clocksource=tsc
+seriport bios da kapalı,
+paralel port ECP+EPP yapıldı.
+
+
+splash
+quiet isolcpus=3 nohz_full=3 rcu_nocbs=3
+
+
+sudo tune2fs -c 2 /dev/sda1
+
+
+saat ayarı;
+sudo apt update
+sudo apt install chrony
+sudo systemctl enable chrony
+sudo systemctl start chrony
+
+sudo chronyc makestep
+
+
+
+dark ayari
+tevfik@linuxcnc:~/.config/geany/colorschemes$ wget https://raw.githubusercontent.com/geany/geany-themes/master/colorschemes/black.conf
+
+
+
+
+    1  sudo apt update 
+    2  sudo apt dist-upgrade
+    3  htop
+    4  sudo tune2fs -c 2 /dev/sda1
+    5  sudo apt install chrony
+    6  sudo systemctl enable chrony
+    7  sudo systemctl start chrony
+    8  sudo chronyc makestep
+    9  wget https://raw.githubusercontent.com/geany/geany-themes/master/colorschemes/black.conf
+   10  history
+   11  sudo halcompile --install acilstop.comp 
+   12  sudo halcompile --install udp.comp
+   13  history
+   
+   	//#define REMOTE_IP "192.168.1.2"
+	//#define REMOTE_UDP_PORT 5000 
+	//stm32 kısmının adresi
+
+//~ ag baglantılarından 
+	//~ kablolu baglantıyı düzenle
+			//~ ipv4 ayarlarından
+				//~ diğer bilgisayar ,le paylaşımlı   kısmı seç
+				//~ 192.168.1.3
+				//~ 255.255.255.0
+				//~ 192.168.1.1   bu kısım silinir ise rotdan çift ip adres olur
+				//~ kaydet
+				
+//~ ag baglantılarından 
+//~ ag yönetiminden yeniden baslat	
+
+
+sudo apt update
+sudo apt install tcpdump
+
+
+sudo tcpdump -i any -n udp port 5000
+	   
+
+	   
+	   

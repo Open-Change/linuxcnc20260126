@@ -1,0 +1,23 @@
+component acilstop "X/Y ferror >1.5 → estop_out=0 (unsafe)";
+license "GPL";
+
+pin in  float x_ferror = 0.0;
+pin in  float y_ferror = 0.0;
+pin out bit  EstopOutDurumu = 1;
+
+function _;
+
+;;
+
+#include <math.h>
+
+FUNCTION(_) {
+    double x = fabs(x_ferror);
+    double y = fabs(y_ferror);
+    double m = (x > y) ? x : y;
+    EstopOutDurumu = (m <= 1.9);
+}
+
+
+
+ 

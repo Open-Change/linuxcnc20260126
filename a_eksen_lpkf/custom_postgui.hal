@@ -1,0 +1,7 @@
+# Include your custom_postgui HAL commands here
+# This file will not be overwritten when you run stepconf again
+
+
+# custom_postgui.hal içinde:
+
+

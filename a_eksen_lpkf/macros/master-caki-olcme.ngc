@@ -1,0 +1,79 @@
+O<master-caki-olcme> SUB
+(  https://github.com/koppi/mk/blob/master/linuxcnc/nc_files/tool-job-begin.ngc  )
+( Filename: master-caki-olcme.ngc )
+
+( LinuxCNC Manual Tool-Change Subroutines for Milling Machines version 1.1: subroutine 2/2 )
+( Intended to be run as a remapped M600 command. Used to indicate that the next tool change, M6, is the first tool of a job. )
+
+#<_ToolDidFirst> = 0                         ( new job, we haven't yet called <tool-change> for the first time )
+G49                                          ( clear tool height adjustment )
+
+O<master-caki-olcme> ENDSUB
+M2
+
+
+asagısını tevfik yazdı olmadi
+ asagısı gececersiz
+
+
+
+
+G21	;milimetre
+G90	;mutlak ekseninde
+G64	;belirtilen nokta kesin git
+G40	;sagdan soldan kesme yok cizgi uzerinde git   
+g49	;cakı uzunlugu iptal  sifir yapıldı
+M9      ; sogutucuyu kapat
+M5      ; spindle motoru kapat
+; m70 ve m72 oku
+g54
+	
+                             (güvenli yer)
+
+  G53 G0  Z-5	            ( makina ekseninde Z-10 git yukarı cık)
+  g53 G0  X30 Y70  		    ( makina ekseninde  probe noktasına gec)
+  (msg,İLK CAKININ BOYU BULMAK  )
+  ;m0;bekle
+                         ; el ile degişme var oldugudan sadece bir adet T1 var
+                         ; m6 cakı degistir
+
+
+;T1 referans cakı yap
+
+  ;G43.1 Z0                  (TLO RESET)
+   
+  g53 g01   x31 y71 F50; probun oldugu yer
+    (msg,dikkkkaaat 75mm inecek)
+  G91 f100                        ( ekseninde f150 eklemeli        )					
+  G38.2 Z-75 F150         ( probe degince kadar F100 yaklas)	
+  g91
+  G1 Z1.9                ( geri kac eklemeli             )               								
+  G38.2 Z-2 F10 	         ( probe degince kadar F10 yaklas)  
+ #<_ProbeUzunlugu> =[ #5063 + #5223 ]   (save reference tool length) (prob degeri z eksen)
+                                         (#5223 g54 de ki Z degeri) 
+
+
+
+  g90                  ( ekseninde f150 mutlak)
+
+ 
+;T1 referans cakı yap
+ #1000=0
+g43.1 z[#<_ProbeUzunlugu>  ] (set new tool offset)
+
+
+
+#1000= [#<_ProbeUzunlugu> ] 
+(debug, T1 master ilk uzunluk  : #<_ProbeUzunlugu>)
+
+                             (güvenli yer)
+
+  ;g53 G1 F200 Z-10		( makina ekseninde Z-10 git yukarı cık)   
+   G53 G0  Z-10	        ( makina ekseninde Z-10 git yukarı cık)
+
+  g53 G0  X30 Y70  		( makina ekseninde  probe noktasına gec)
+    (msg,cakının boyu değişti)
+
+
+O<master-caki-olcme> ENDSUB
+M2

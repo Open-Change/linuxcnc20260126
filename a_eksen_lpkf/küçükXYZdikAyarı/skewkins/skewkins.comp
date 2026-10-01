@@ -1,0 +1,116 @@
+component skewkins;
+
+description
+"""
+
+Implements deskewing of a 3-axis machine
+
+""";
+// The fpin pin is not accessible in kinematics functions.
+// Use the *_setup() function for pins and params used by kinematics.
+pin out s32 fpin=0"pin to demonstrate use of a conventional (non-kinematics) function fdemo";
+function fdemo;
+license "GPL";
+author "Adaptation of previous code";
+;;
+
+#include "rtapi_math.h"
+#include "kinematics.h"
+
+static struct haldata {
+    hal_float_t *skew_y;
+    hal_float_t *skew_xz;
+    hal_float_t *skew_yz;
+} *haldata;
+
+
+FUNCTION(fdemo) {
+   // This function can be added to a thread (addf) for
+   // purposes not related to the kinematics functions.
+   if (fpin == 0) {
+       rtapi_print("fdemo function added to thread\n");
+   }
+   fpin++;
+}
+
+static int skewkins_setup(void) {
+#define HAL_PREFIX "skewkins"
+    int res=0;
+
+    // inherit comp_id from rtapi_main()
+    if (comp_id < 0) goto error;
+    // set unready to allow creation of pins
+    if (hal_set_unready(comp_id)) goto error;
+
+    haldata = hal_malloc(sizeof(struct haldata));
+    if (!haldata) goto error;
+
+    // hal pin examples:
+    res += hal_pin_float_newf(HAL_IN ,&(haldata->skew_y) ,comp_id,"%s.skew-y" ,HAL_PREFIX);
+    res += hal_pin_float_newf(HAL_IN ,&(haldata->skew_xz) ,comp_id,"%s.skew-xz" ,HAL_PREFIX);
+    res += hal_pin_float_newf(HAL_IN ,&(haldata->skew_yz) ,comp_id,"%s.skew-yz" ,HAL_PREFIX);
+
+    if (res) goto error;
+    hal_ready(comp_id);
+    rtapi_print("*** %s setup ok\n",__FILE__);
+    return 0;
+error:
+    rtapi_print("\n!!! %s setup failed res=%d\n\n",__FILE__,res);
+    return -1;
+#undef HAL_PREFIX
+}
+
+KINS_NOT_SWITCHABLE
+// see millturn.comp for example of switchable kinematics
+
+EXPORT_SYMBOL(kinematicsType);
+EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsForward);
+
+KINEMATICS_TYPE kinematicsType()
+{
+static bool is_setup=0;
+    if (!is_setup) skewkins_setup();
+    return KINEMATICS_IDENTITY; // set as required
+           // Note: If kinematics are identity, using KINEMATICS_BOTH
+           //       may be used in order to allow a gui to display
+           //       joint values in preview prior to homing
+} // kinematicsType()
+
+static bool is_ready=0;
+int kinematicsForward(const double *j,
+                      EmcPose * pos,
+                      const KINEMATICS_FORWARD_FLAGS * fflags,
+                      KINEMATICS_INVERSE_FLAGS * iflags)
+{
+    static bool gave_msg;
+    // [KINS]JOINTS=3
+    pos->tran.x = j [0] + j [1]*(*(haldata->skew_y)) + j [2]*(*(haldata->skew_xz));
+    pos->tran.y = j [1] + j [2]*(*(haldata->skew_yz));
+    pos->tran.z = j [2];
+    // unused coordinates:
+    pos->a = 0;
+    pos->b = 0;
+    pos->c = 0;
+    pos->u = 0;
+    pos->v = 0;
+    pos->w = 0;
+
+    return 0;
+} // kinematicsForward()
+
+int kinematicsInverse(const EmcPose * pos,
+                      double *j,
+                      const KINEMATICS_INVERSE_FLAGS * iflags,
+                      KINEMATICS_FORWARD_FLAGS * fflags)
+{
+    is_ready = 1; // Inverse is not called until homed for KINEMATICS_BOTH
+
+
+    j [0] = pos->tran.x - pos->tran.y*(*(haldata->skew_y)) - pos->tran.z*(*(haldata->skew_xz));
+    j [1] = pos->tran.y - pos->tran.z*(*(haldata->skew_yz));
+    j [2] = pos->tran.z;
+
+
+    return 0;
+} // kinematicsInverse()

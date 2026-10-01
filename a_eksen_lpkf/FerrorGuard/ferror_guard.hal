@@ -1,0 +1,69 @@
+# ==============================================================================
+# FERROR_GUARD BİLEŞEN YÜKLEME VE THREAD BİNDİRME
+# ==============================================================================
+loadrt ferror_guard  count=1 
+addf ferror-guard.0 servo-thread
+
+
+# ==============================================================================
+# PARAMETRE AYARLARI (İhtiyaca Göre INI Dosyasından da Alınabilir)
+# ==============================================================================
+setp ferror-guard.0.limit-pause           0.900   # 0.9mm üzerinde Program Pause
+setp ferror-guard.0.limit-hold            0.500   # 0.5mm üzerinde Feed Hold
+setp ferror-guard.0.limit-dec             0.150   # 0.3mm üzerinde Feed Override düşür (DEC)
+setp ferror-guard.0.limit-inc             0.070   # 0.08mm altında stabil ise Feed Override artır (INC)
+setp ferror-guard.0.limit-hysteresis-high 0.100   # DEC'den çıkış histerezis eşiği
+
+setp ferror-guard.0.pulse-width           0.050   # 50ms darbe genişliği
+setp ferror-guard.0.pulse-interval        0.200   # Darbeler arası 200ms bekleme
+setp ferror-guard.0.inc-stable-time       3.000   # Hata düşükken 3sn bekle, sonra hızı artır
+setp ferror-guard.0.hold-stable-time      1.500   # Hold sonrası 1.5sn bekle, sonra harekete devam et
+
+# ==============================================================================
+# GİRDİ BAĞLANTILARI (Sensör ve Sistem Sinyalleri)
+# ==============================================================================
+# X Ekseni Takip Hatası (Hangi eksen kritikse veya bileşik hata verisi bağlanabilir)
+#net x-ferror          joint.0.f-error               => ferror-guard.0.ferror-in
+
+# Yeni düzeltilmiş satır (var olan xtakiphatasi sinyaline ekleniyor):
+net xytakiphatasi  acilstop.0.xy-ferror  => ferror-guard.0.ferror-in
+  
+# Program Çalışıyor ve Hareket Tipi Bilgileri
+#net pgrm-running      halui.program.is-running      => ferror-guard.0.program-running
+
+# Yeni düzeltilmiş satır (Var olan cycle-timer sinyaline ekleme yapıldı):
+net cycle-timer => ferror-guard.0.program-running
+
+
+
+
+net current-motion-tp motion.motion-type            => ferror-guard.0.motion-type
+
+# Mevcut Feed Override Değeri
+net current-feed-scl  halui.feed-override.value     => ferror-guard.0.halui-feed-scale
+
+# ==============================================================================
+# ÇIKIŞ BAĞLANTILARI (Sistem Müdahale Sinyalleri)
+# ==============================================================================
+# Feed Hold ve Program Pause Kontrolü
+net fg-feed-hold      ferror-guard.0.feed-hold      => motion.feed-hold
+net fg-program-pause  ferror-guard.0.program-pause  => halui.program.pause
+
+# Otomatik Feed Override Pulse Tetikleyicileri
+net fg-feed-inc       ferror-guard.0.feed-inc-pulse => halui.feed-override.increase
+net fg-feed-dec       ferror-guard.0.feed-dec-pulse => halui.feed-override.decrease
+
+# ==============================================================================
+# MANUEL BUTONLAR VE HARİCİ RESET (Opsiyonel Fiziksel / GUI Panel Bağlantıları)
+# ==============================================================================
+# Fiziksel butonlar veya PyVCP / GladeVCP paneli üzerinden kontrol için:
+# net btn-peak-reset  pyvcp.reset-peak-btn          => ferror-guard.0.reset-peak-pin
+# net btn-manual-inc  pyvcp.inc-feed-btn            => ferror-guard.0.manual-inc
+# net btn-manual-dec  pyvcp.dec-feed-btn            => ferror-guard.0.manual-dec
+
+# ==============================================================================
+# DURUM VE İSTATİSTİK İZLEME (PyVCP / GladeVCP Göstergeleri İçin)
+# ==============================================================================
+# net fg-status-code  ferror-guard.0.error-code-out => pyvcp.error-code-number
+# net fg-peak-ferror  ferror-guard.0.peak-ferror-out => pyvcp.peak-ferror-meter
+# net fg-active-scale ferror-guard.0.current-feed-scale => pyvcp.active-scale-number

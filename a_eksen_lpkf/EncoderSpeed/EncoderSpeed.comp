@@ -1,0 +1,245 @@
+component EncoderSpeed "UDP gecikmeli encoder icin observer + PID + FF (tam entegre)";
+
+// =============================================================================
+// GIRIS PINLERI
+// =============================================================================
+pin in  float pos_in            "Ham pozisyon (UDP, ~20ms gecikmeli)";
+pin in  bit   yeniposizyongeldi "Yeni pozisyon verisi geldi (UDP tarafindan uretilir)";
+pin in  float cmd_in            "Hedef pozisyon (PID setpoint)";
+pin in  bit   enable            "1 = kontrol aktif, 0 = cikis sifir";
+
+// =============================================================================
+// CIKIS PINLERI
+// =============================================================================
+pin out float pos_out      "Temiz pozisyon (observer tahmini)";
+pin out float vel_out      "Temiz hiz [birim/s]";
+pin out float acc_out      "Tahmini ivme [birim/s^2] (tani)";
+pin out float pid_out      "PID kontrol cikisi";
+pin out bit   jump_flag    "Outlier/jump tespit edildi (tani)";
+pin out bit   stale_flag   "UDP paketi gecikti (tani)";
+pin out float innov_out    "Yenilik buyuklugu (tani)";
+pin out float err_out      "PID hata (cmd_in - pos_out) (tani)";
+pin out bit   wrap_flag    "360 derece wrap tespit edildi (tani)";
+
+// =============================================================================
+// OBSERVER PARAMETRELERI
+// =============================================================================
+param rw float alpha = 0.20;            // Pozisyon duzeltme kazanci
+param rw float beta = 0.015;            // Hiz duzeltme kazanci
+param rw float obs_gamma = 0.0;         // Ivme duzeltme kazanci
+param rw float vel_alpha = 0.30;        // Hiz EMA katsayisi
+param rw float jump_thresh = 0.50;      // Outlier esigi [birim]
+param rw float quant_step = 0.087891;   // Enkoder 1 LSB degeri [derece]
+param rw float deadband_mult = 0.10;    // (KULLANILMIYOR - geriye uyumluluk)
+param rw float stale_timeout = 0.100;   // Paket timeout [s]
+
+// --- Wrap ve pozisyon deadband ---
+param rw float wrap_range = 360.0;      // Encoder wrap araligi [derece]
+param rw float pos_deadband = 0.5;      // Pozisyon deadband katsayisi (quant_step'in kati)
+
+// =============================================================================
+// PID PARAMETRELERI
+// =============================================================================
+param rw float pid_kp = 20.0;           // Oransal kazanc
+param rw float pid_ki = 1.0;            // Integral kazanc
+param rw float pid_kd = 2.0;            // Turev kazanci (observer hizini kullanir)
+param rw float pid_kff = 1.0;           // Hiz feed-forward kazanci
+param rw float pid_kacc = 0.0;          // Ivme feed-forward kazanci
+param rw float pid_out_min = -2.0;      // PID alt sinir
+param rw float pid_out_max = 2.0;       // PID ust sinir
+param rw float pid_i_max = 5.0;         // Integral anti-windup siniri
+
+// =============================================================================
+// IC DEGISKENLER (her instance icin ayri)
+// =============================================================================
+variable double obs_x       = 0.0;      // Tahmin edilen pozisyon
+variable double obs_v       = 0.0;      // Tahmin edilen hiz
+variable double obs_a       = 0.0;      // Tahmin edilen ivme
+variable double vel_filt    = 0.0;      // EMA filtrelenmis hiz
+variable double prev_meas   = 0.0;      // Son gecerli UDP olcumu (duzeltilmis)
+variable double prev_time   = 0.0;      // Son UDP paket zamani
+variable double pid_integ   = 0.0;      // PID integral birikimi
+variable int    initialized = 0;        // Baslangic bayragi
+variable int    have_meas   = 0;        // En az bir gecerli olcum alindi mi
+
+function _ fp;
+
+license "GPL";
+;;
+
+#include <rtapi_math.h>
+
+// -----------------------------------------------------------------------------
+// Yardimci: doygunluk (saturation)
+// -----------------------------------------------------------------------------
+static inline double clampd(double v, double lo, double hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+// -----------------------------------------------------------------------------
+// Ana fonksiyon — her servo thread cagrisinda calisir
+// -----------------------------------------------------------------------------
+FUNCTION(_) {
+    double dt = period * 1e-9;              // nanosaniye -> saniye
+    double t_now = prev_time + dt;
+
+    // RT thread jitter korumasi
+    if (dt <= 0.0 || dt > 0.005) return;
+
+    // =========================================================================
+    // 1) Baslangic
+    // =========================================================================
+    if (!initialized) {
+        obs_x       = pos_in;
+        obs_v       = 0.0;
+        obs_a       = 0.0;
+        vel_filt    = 0.0;
+        prev_meas   = pos_in;
+        prev_time   = t_now;
+        pid_integ   = 0.0;
+        initialized = 1;
+        have_meas   = 0;
+
+        pos_out    = obs_x;
+        vel_out    = 0.0;
+        acc_out    = 0.0;
+        pid_out    = 0.0;
+        jump_flag  = 0;
+        stale_flag = 0;
+        wrap_flag  = 0;
+        innov_out  = 0.0;
+        err_out    = 0.0;
+        return;
+    }
+
+    // =========================================================================
+    // 2) Observer PREDICT (her ornekte calisir)
+    //    x_hat += v_hat*dt + 0.5*a_hat*dt^2
+    //    v_hat += a_hat*dt
+    // =========================================================================
+    obs_x += obs_v * dt + 0.5 * obs_a * dt * dt;
+    obs_v += obs_a * dt;
+
+    // =========================================================================
+    // 3) Yeni UDP verisi geldiyse CORRECT
+    // =========================================================================
+    jump_flag  = 0;
+    stale_flag = 0;
+    wrap_flag  = 0;
+
+    if (yeniposizyongeldi) {
+        double dt_meas = t_now - prev_time;
+        if (dt_meas < 1e-6) dt_meas = dt;
+
+        // --- 360 DERECE WRAP DUZELTMESI ---
+        // Encoder 0-360 arasinda dongusel ise, ham veri
+        // 360 -> 0 gecisinde buyuk bir sicrama gosterir.
+        // Bu sicramayi tespit edip duzeltiriz.
+        double raw_diff = pos_in - prev_meas;
+        double pos_corrected = pos_in;
+        double half_wrap = wrap_range * 0.5;
+
+        if (raw_diff > half_wrap) {
+            // Ileri wrap: 0'a dusmus, gercekte 360 eklenmis
+            pos_corrected = pos_in - wrap_range;
+            wrap_flag = 1;
+        } else if (raw_diff < -half_wrap) {
+            // Geri wrap: 360'a cikmis, gercekte 0'a dusmus
+            pos_corrected = pos_in + wrap_range;
+            wrap_flag = 1;
+        }
+
+        // --- OUTLIER REDDI (wrap sonrasi) ---
+        double expected = prev_meas + obs_v * dt_meas;
+        double diff = pos_corrected - expected;
+
+        if (fabs(diff) > jump_thresh) {
+            jump_flag = 1;
+            // Reddedildi: observer kendi tahmininde ilerler
+            // prev_meas ve prev_time GUNCELLENMEZ
+        } else {
+            // --- Innovation (yenilik) ---
+            double r = pos_corrected - obs_x;
+            innov_out = r;
+
+            // --- POZISYON DEADBAND (DUZELTILMIS) ---
+            // Kucuk yenilikleri (encoder kuantizasyonundan kaynaklanan
+            // 1-count salinimi) bastirmak icin obs_x'i pos_corrected'a
+            // KILITLE. Boylece predict'ten kaynaklanan kayma onlenir.
+            double pos_db = quant_step * pos_deadband;
+
+            if (fabs(r) < pos_db) {
+                // Kucuk hata: obs_x'i olcume kilitle
+                obs_x = pos_corrected;
+                // Hiz ve ivme tahminlerini GUNCELLEME
+                // (r = 0 olsa bile predict'ten gelen obs_v korunur)
+                r = 0.0;
+            } else {
+                // Normal alpha-beta-gamma guncellemesi
+                double dt2 = dt_meas * dt_meas;
+                obs_x += alpha * r;
+                obs_v += (beta / dt_meas) * r;
+                obs_a += (2.0 * obs_gamma / dt2) * r;
+            }
+
+            prev_meas = pos_corrected;   // DUZELTILMIS deger
+            prev_time = t_now;
+            have_meas = 1;
+        }
+    }
+
+    // --- Stale (paket gecikmesi) kontrolu ---
+    if ((t_now - prev_time) > stale_timeout) {
+        stale_flag = 1;
+    }
+
+    // =========================================================================
+    // 4) Hiz EMA yumusatma
+    // =========================================================================
+    if (vel_alpha >= 1.0) {
+        vel_filt = obs_v;
+    } else if (vel_alpha > 0.0) {
+        vel_filt = vel_alpha * obs_v + (1.0 - vel_alpha) * vel_filt;
+    } else {
+        vel_filt = 0.0;
+    }
+
+    // =========================================================================
+    // 5) Cikislar (observer)
+    // =========================================================================
+    pos_out = obs_x;
+    vel_out = vel_filt;
+    acc_out = obs_a;
+
+    // =========================================================================
+    // 6) PID + Feed-Forward
+    //    u = Kp*e + Ki*integral(e) + Kd*(-v) + Kff*v + Kacc*a
+    // =========================================================================
+    if (!enable) {
+        pid_integ = 0.0;
+        pid_out   = 0.0;
+        err_out   = 0.0;
+        return;
+    }
+
+    double err = cmd_in - obs_x;
+    err_out = err;
+
+    // Integral + anti-windup
+    pid_integ += pid_ki * err * dt;
+    pid_integ = clampd(pid_integ, -pid_i_max, pid_i_max);
+
+    // Terimler
+    double p_term = pid_kp * err;
+    double d_term = -pid_kd * vel_filt;         // d(err)/dt = -dx/dt
+    double ff     =  pid_kff * vel_filt;        // gecikme kompanzasyonu
+    double aff    =  pid_kacc * obs_a;          // ivme FF
+
+    // Toplam
+    double u = p_term + pid_integ + d_term + ff + aff;
+
+    // Cikis doygunlugu
+    pid_out = clampd(u, pid_out_min, pid_out_max);
+}

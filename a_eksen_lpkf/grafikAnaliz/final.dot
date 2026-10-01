@@ -1,0 +1,110 @@
+digraph net {
+    node [shape=record];
+    sig_adir [shape=diamond, label="adir"]
+    sig_aenable [shape=diamond, label="aenable"]
+    sig_apos_cmd [shape=diamond, label="apos-cmd"]
+    sig_astep [shape=diamond, label="astep"]
+    sig_comp [shape=diamond, label="comp"]
+    sig_estop_out [shape=diamond, label="estop-out"]
+    sig_home_x [shape=diamond, label="home-x"]
+    sig_home_y [shape=diamond, label="home-y"]
+    sig_home_z [shape=diamond, label="home-z"]
+    sig_probe_in [shape=diamond, label="probe-in"]
+    sig_spindle_on [shape=diamond, label="spindle-on"]
+    sig_tool_change [shape=diamond, label="tool-change"]
+    sig_tool_changed [shape=diamond, label="tool-changed"]
+    sig_tool_number [shape=diamond, label="tool-number"]
+    sig_tool_prepare_loopback [shape=diamond, label="tool-prepare-loopback"]
+    sig_xdir [shape=diamond, label="xdir"]
+    sig_xenable [shape=diamond, label="xenable"]
+    sig_xpos_cmd [shape=diamond, label="xpos-cmd"]
+    sig_xpos_fb [shape=diamond, label="xpos-fb"]
+    sig_xstep [shape=diamond, label="xstep"]
+    sig_ydir [shape=diamond, label="ydir"]
+    sig_yenable [shape=diamond, label="yenable"]
+    sig_ypos_cmd [shape=diamond, label="ypos-cmd"]
+    sig_ystep [shape=diamond, label="ystep"]
+    sig_zdir [shape=diamond, label="zdir"]
+    sig_zenable [shape=diamond, label="zenable"]
+    sig_zpos_cmd [shape=diamond, label="zpos-cmd"]
+    sig_zpos_fb [shape=diamond, label="zpos-fb"]
+    sig_zstep [shape=diamond, label="zstep"]
+
+    parport_0 [label="<parport_0>parport.0|<pin_01_out>pin-01-out|<pin_02_out>pin-02-out|<pin_03_out>pin-03-out|<pin_04_out>pin-04-out|<pin_05_out>pin-05-out|<pin_06_out>pin-06-out|<pin_07_out>pin-07-out|<pin_08_out>pin-08-out|<pin_10_in>pin-10-in|<pin_11_in_not>pin-11-in-not|<pin_12_in_not>pin-12-in-not|<pin_13_in_not>pin-13-in-not|<pin_14_out>pin-14-out|<pin_17_out>pin-17-out"];
+    stepgen_3 [label="<stepgen_3>stepgen.3|<dir>dir|<enable>enable|<position_cmd>position-cmd|<step>step"];
+    joint_3 [label="<joint_3>joint.3|<amp_enable_out>amp-enable-out|<motor_pos_cmd>motor-pos-cmd|<motor_pos_fb>motor-pos-fb"];
+    Zatan2 [label="<Zatan2>Zatan2|<Bx>Bx"];
+    aci [label="<aci>aci|<aout>aout"];
+    pyvcp [label="<pyvcp>pyvcp|<cikanAci>cikanAci"];
+    iocontrol_0 [label="<iocontrol_0>iocontrol.0|<emc_enable_in>emc-enable-in|<tool_change>tool-change|<tool_changed>tool-changed|<tool_prep_number>tool-prep-number|<tool_prepare>tool-prepare|<tool_prepared>tool-prepared|<user_enable_out>user-enable-out"];
+    joint_0 [label="<joint_0>joint.0|<amp_enable_out>amp-enable-out|<home_sw_in>home-sw-in|<motor_pos_cmd>motor-pos-cmd|<motor_pos_fb>motor-pos-fb"];
+    joint_1 [label="<joint_1>joint.1|<amp_enable_out>amp-enable-out|<home_sw_in>home-sw-in|<motor_pos_cmd>motor-pos-cmd|<motor_pos_fb>motor-pos-fb"];
+    joint_2 [label="<joint_2>joint.2|<amp_enable_out>amp-enable-out|<home_sw_in>home-sw-in|<motor_pos_cmd>motor-pos-cmd|<motor_pos_fb>motor-pos-fb"];
+    motion [label="<motion>motion|<probe_input>probe-input"];
+    hal_manualtoolchange [label="<hal_manualtoolchange>hal_manualtoolchange|<change>change|<changed>changed|<number>number"];
+    stepgen_0 [label="<stepgen_0>stepgen.0|<dir>dir|<enable>enable|<position_cmd>position-cmd|<position_fb>position-fb|<step>step"];
+    stepgen_1 [label="<stepgen_1>stepgen.1|<dir>dir|<enable>enable|<position_cmd>position-cmd|<step>step"];
+    stepgen_2 [label="<stepgen_2>stepgen.2|<dir>dir|<enable>enable|<position_cmd>position-cmd|<position_fb>position-fb|<step>step"];
+
+    iocontrol_0:user_enable_out -> sig_estop_out [dir=forward,weight=3];
+    sig_probe_in -> motion:probe_input [dir=forward,weight=1];
+    sig_tool_number -> hal_manualtoolchange:number [dir=forward,weight=1];
+    joint_3:motor_pos_cmd -> sig_apos_cmd [dir=forward,weight=3];
+    aci:aout -> sig_comp [dir=forward,weight=3];
+    stepgen_2:step -> sig_zstep [dir=forward,weight=3];
+    sig_ystep -> parport_0:pin_02_out [dir=forward,weight=1];
+    sig_tool_changed -> iocontrol_0:tool_changed [dir=forward,weight=1];
+    sig_yenable -> stepgen_1:enable [dir=forward,weight=1];
+    sig_ypos_cmd -> stepgen_1:position_cmd [dir=forward,weight=1];
+    sig_zdir -> parport_0:pin_07_out [dir=forward,weight=1];
+    sig_zpos_cmd -> stepgen_2:position_cmd [dir=forward,weight=1];
+    sig_xenable -> stepgen_0:enable [dir=forward,weight=1];
+    stepgen_3:step -> sig_astep [dir=forward,weight=3];
+    sig_xstep -> parport_0:pin_04_out [dir=forward,weight=1];
+    joint_0:motor_pos_cmd -> sig_xpos_cmd [dir=forward,weight=3];
+    joint_0:amp_enable_out -> sig_xenable [dir=forward,weight=3];
+    stepgen_2:position_fb -> sig_zpos_fb [dir=forward,weight=3];
+    sig_apos_cmd -> joint_3:motor_pos_fb [dir=forward,weight=1];
+    sig_apos_cmd -> stepgen_3:position_cmd [dir=forward,weight=1];
+    sig_estop_out -> parport_0:pin_01_out [dir=forward,weight=1];
+    sig_tool_prepare_loopback -> iocontrol_0:tool_prepared [dir=forward,weight=1];
+    sig_aenable -> stepgen_3:enable [dir=forward,weight=1];
+    joint_1:amp_enable_out -> sig_yenable [dir=forward,weight=3];
+    sig_astep -> parport_0:pin_14_out [dir=forward,weight=1];
+    stepgen_0:dir -> sig_xdir [dir=forward,weight=3];
+    hal_manualtoolchange:changed -> sig_tool_changed [dir=forward,weight=3];
+    joint_3:amp_enable_out -> sig_aenable [dir=forward,weight=3];
+    sig_xpos_fb -> joint_0:motor_pos_fb [dir=forward,weight=1];
+    stepgen_2:dir -> sig_zdir [dir=forward,weight=3];
+    sig_estop_out -> iocontrol_0:emc_enable_in [dir=forward,weight=1];
+    sig_zstep -> parport_0:pin_06_out [dir=forward,weight=1];
+    joint_1:motor_pos_cmd -> sig_ypos_cmd [dir=forward,weight=3];
+    parport_0:pin_11_in_not -> sig_home_x [dir=forward,weight=3];
+    parport_0:pin_12_in_not -> sig_home_z [dir=forward,weight=3];
+    sig_ypos_cmd -> joint_1:motor_pos_fb [dir=forward,weight=1];
+    sig_ydir -> parport_0:pin_03_out [dir=forward,weight=1];
+    sig_xdir -> parport_0:pin_05_out [dir=forward,weight=1];
+    stepgen_0:position_fb -> sig_xpos_fb [dir=forward,weight=3];
+    sig_comp -> Zatan2:Bx [dir=forward,weight=1];
+    sig_xpos_cmd -> stepgen_0:position_cmd [dir=forward,weight=1];
+    stepgen_1:dir -> sig_ydir [dir=forward,weight=3];
+    sig_spindle_on -> parport_0:pin_17_out [dir=forward,weight=1];
+    stepgen_3:dir -> sig_adir [dir=forward,weight=3];
+    sig_adir -> parport_0:pin_08_out [dir=forward,weight=1];
+    parport_0:pin_10_in -> sig_home_y [dir=forward,weight=3];
+    sig_home_z -> joint_2:home_sw_in [dir=forward,weight=1];
+    sig_comp -> pyvcp:cikanAci [dir=forward,weight=1];
+    iocontrol_0:tool_change -> sig_tool_change [dir=forward,weight=3];
+    sig_zenable -> stepgen_2:enable [dir=forward,weight=1];
+    sig_home_y -> joint_1:home_sw_in [dir=forward,weight=1];
+    iocontrol_0:tool_prepare -> sig_tool_prepare_loopback [dir=forward,weight=3];
+    sig_zpos_fb -> joint_2:motor_pos_fb [dir=forward,weight=1];
+    sig_home_x -> joint_0:home_sw_in [dir=forward,weight=1];
+    iocontrol_0:tool_prep_number -> sig_tool_number [dir=forward,weight=3];
+    stepgen_0:step -> sig_xstep [dir=forward,weight=3];
+    joint_2:amp_enable_out -> sig_zenable [dir=forward,weight=3];
+    parport_0:pin_13_in_not -> sig_probe_in [dir=forward,weight=3];
+    stepgen_1:step -> sig_ystep [dir=forward,weight=3];
+    joint_2:motor_pos_cmd -> sig_zpos_cmd [dir=forward,weight=3];
+    hal_manualtoolchange:change -> sig_tool_change [dir=forward,weight=3];
+}

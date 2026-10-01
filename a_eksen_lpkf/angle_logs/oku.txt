@@ -1,0 +1,15 @@
+custom.hal  yaz
+
+# Python bilesenini tam yoluyla yukle
+loadusr -Wn angle_logger python3 /home/tevfik/Masaüstü/linuxcnc20260126/a_eksen_lpkf/angle_logs/angle_logger.py
+
+ 
+#net angle-signal udp.toplamXacisi => angle_logger.angle-in
+
+
+ #istenile grafik  udp.toplamXacisi   pyvcp kısıma yazılmştı sildim angle_logger.angle-in 
+
+ 
+# halui.machine.is-on -> angle_logger.power-in (SADECE OKUMA)
+net power-signal halui.machine.is-on => angle_logger.power-in
+
