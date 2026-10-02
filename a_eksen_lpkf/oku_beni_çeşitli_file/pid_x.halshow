@@ -1,1 +1,0 @@
-pin+joint.0.pos-cmd pin+pid.x.command sig+xpos-fb pin+udp.0.position-fb pin+pid.x.feedback pin+pid.x.output pin+udp.packetsgelen pin+udp.packets pin+pid.x.error pin+stepgen.0.counts pin+udp.ozelveri sig+machine-is-on
