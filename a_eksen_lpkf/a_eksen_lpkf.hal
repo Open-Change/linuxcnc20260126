@@ -228,7 +228,7 @@ net spindle-on      => parport.0.pin-17-out
 
  # probe için
 loadrt debounce cfg=2          
-setp debounce.0.delay  1000
+setp debounce.0.delay  15
 #g61.1
 #G38.2 Z-1.500 F40.0
 #G4 P0.4
