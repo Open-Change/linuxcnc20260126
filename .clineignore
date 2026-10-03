@@ -1,0 +1,18 @@
+# Cline gormesin
+a_eksen_lpkf/macros/
+a_eksen_lpkf/README.md
+*.code-workspace
+a_eksen_lpkf/position.txt
+a_eksen_lpkf/autosave.halscope
+a_eksen_lpkf/halshow.preferences
+a_eksen_lpkf/.halshow_watchlist_backup
+a_eksen_lpkf/toggle_states.json
+a_eksen_lpkf/linuxcnc.var
+a_eksen_lpkf/linuxcnc.var.bak
+a_eksen_lpkf/*.log
+a_eksen_lpkf/*.bak
+a_eksen_lpkf/*.halshow
+a_eksen_lpkf/grafikAnaliz/
+*.png
+*.svg
+*.xls

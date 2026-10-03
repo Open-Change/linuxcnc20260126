@@ -1,5 +1,0 @@
-halscope: could not find thread: 'THREAD=servo-thread'
-halscope: could not set record length: 'MAXCHAN=2'
-halscope: could not set horizontal multiplier: 'HMULT=1'
-halscope: could not set horizontal zoom: 'HZOOM=1'
-halscope: config file 'test1' caused 4 warnings
